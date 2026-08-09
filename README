@@ -1,2 +1,4 @@
+you need qbe avaible
+
 to build just run:
-    make run
+    make
