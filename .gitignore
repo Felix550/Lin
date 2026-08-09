@@ -6,6 +6,7 @@
 *.exe~
 *.dll
 *.so
+*.o
 *.dylib
 
 # Test binary, built with `go test -c`
@@ -27,6 +28,10 @@ go.work.sum
 # env file
 .env
 
+lin
+main
+
 # Editor/IDE
 # .idea/
-# .vscode/
+.vscode/
+probeQBE/

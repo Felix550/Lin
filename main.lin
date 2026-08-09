@@ -1,0 +1,5 @@
+set x, y, z = f64(69/2), 35, u8(255)
+dump "34.5 + 35 = " + string(x + y) + "\n"
+dump z
+set a = u8(i64(128)) ^ 2
+dump a
