@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"lin/commons"
 	"lin/lexer"
+	"math"
 	"os"
 )
 
@@ -27,6 +28,7 @@ const (
 	KIND_POW
 	KIND_MOD
 	KIND_CAST
+	KIND_CONSTSET
 	KIND_VARINIT
 	KIND_VARGET
 	KIND_VARASSIGN
@@ -60,6 +62,8 @@ func (t ExprKind) String() string {
 		return "pow"
 	case KIND_MOD:
 		return "mod"
+	case KIND_CONSTSET:
+		return "const set"
 	case KIND_VARINIT:
 		return "init var"
 	case KIND_VARGET:
@@ -79,12 +83,14 @@ type SymbolKind int
 
 const (
 	SYMBOL_VAR SymbolKind = iota
+	SYMBOL_CONST
 )
 
 type ContextKind int
 
 const (
 	CONTEXT_VARSET ContextKind = iota
+	CONTEXT_CONSTSET
 	CONTEXT_CAST
 	CONTEXT_ROOT
 	CONTEXT_DUMP
@@ -113,6 +119,8 @@ type Symbol struct {
 	Name string
 	Type commons.ExprType
 	Kind SymbolKind
+
+	Value *Expr
 }
 
 type Context struct {
@@ -250,10 +258,29 @@ func (e *Expr) IsConstant() bool {
 		KIND_FLOAT,
 		KIND_DOUBLE,
 		KIND_STRING:
-		return true
-	}
 
-	return false
+		return true
+
+	case KIND_ADD,
+		KIND_SUB,
+		KIND_MUL,
+		KIND_DIV,
+		KIND_MOD,
+		KIND_POW,
+		KIND_CAST,
+		KIND_STRCAT:
+
+		for _, child := range e.Children {
+			if !child.IsConstant() {
+				return false
+			}
+		}
+
+		return true
+
+	default:
+		return false
+	}
 }
 
 func (p *Parser) expectKind(kind lexer.TokenKind) lexer.Token {
@@ -353,10 +380,6 @@ func (p *Parser) parseAssign(id lexer.Token) *Expr {
 	return expr
 }
 
-func (p *Parser) parseConstSet(id lexer.Token) *Expr {
-	return &Expr{} // TODO: Implement consts
-}
-
 func (p *Parser) parseId() *Expr {
 	id := p.expectKind(lexer.TOKEN_ID)
 
@@ -372,6 +395,11 @@ func (p *Parser) parseId() *Expr {
 			commons.CrashOut(fmt.Sprintf("no symbol exists with name %q", id.Val_string), p.lexer.File_path, id.Line, id.Column)
 			os.Exit(1)
 		}
+
+		if symbol.Kind == SYMBOL_CONST {
+			return symbol.Value
+		}
+
 		expr := p.newExpr(KIND_VARGET, symbol.Type, id)
 		expr.ValueString = symbol.Name
 		return expr
@@ -773,6 +801,10 @@ func (p *Parser) parseDump() *Expr {
 
 	value := p.parseExpression()
 
+	if value.IsConstant() {
+		value = p.evalConst(value)
+	}
+
 	value.checkType(
 		commons.TYPE_I32, commons.TYPE_I64, // Full Number
 		commons.TYPE_F64, commons.TYPE_F32, // Decimal
@@ -897,6 +929,446 @@ func (p *Parser) parseSet() []*Expr {
 
 	return result
 }
+
+// #region const-parsing
+func (p *Parser) newConstInt(value int32, root *Expr) *Expr {
+	return &Expr{
+		Kind:     KIND_INT,
+		Type:     commons.TYPE_I32,
+		ValueInt: value,
+		Line:     root.Line,
+		Column:   root.Column,
+		Parser:   p,
+	}
+}
+
+func (p *Parser) newConstLong(value int64, root *Expr) *Expr {
+	return &Expr{
+		Kind:      KIND_LONG,
+		Type:      commons.TYPE_I64,
+		ValueLong: value,
+		Line:      root.Line,
+		Column:    root.Column,
+		Parser:    p,
+	}
+}
+
+func (p *Parser) newConstFloat(value float32, root *Expr) *Expr {
+	return &Expr{
+		Kind:       KIND_FLOAT,
+		Type:       commons.TYPE_F32,
+		ValueFloat: value,
+		Line:       root.Line,
+		Column:     root.Column,
+		Parser:     p,
+	}
+}
+
+func (p *Parser) newConstDouble(value float64, root *Expr) *Expr {
+	return &Expr{
+		Kind:        KIND_DOUBLE,
+		Type:        commons.TYPE_F64,
+		ValueDouble: value,
+		Line:        root.Line,
+		Column:      root.Column,
+		Parser:      p,
+	}
+}
+
+func (p *Parser) newConstString(value string, root *Expr) *Expr {
+	id := len(p.Strings)
+	p.Strings[id] = value
+
+	return &Expr{
+		Kind:        KIND_STRING,
+		Type:        commons.TYPE_STRING,
+		ValueString: value,
+		ValueLong:   int64(id),
+		Line:        root.Line,
+		Column:      root.Column,
+		Parser:      p,
+	}
+}
+
+func (p *Parser) evalConst(expr *Expr) *Expr {
+	switch expr.Kind {
+	case KIND_INT:
+		return expr
+
+	case KIND_LONG:
+		return expr
+
+	case KIND_FLOAT:
+		return expr
+
+	case KIND_DOUBLE:
+		return expr
+
+	case KIND_STRING:
+		return expr
+
+	case KIND_ADD:
+		left := p.evalConst(expr.Children[0])
+		right := p.evalConst(expr.Children[1])
+
+		switch expr.Type {
+		case commons.TYPE_I32:
+			return &Expr{
+				Kind:     KIND_INT,
+				Type:     commons.TYPE_I32,
+				ValueInt: left.ValueInt + right.ValueInt,
+				Line:     expr.Line,
+				Column:   expr.Column,
+				Parser:   p,
+			}
+
+		case commons.TYPE_I64:
+			return &Expr{
+				Kind:      KIND_LONG,
+				Type:      commons.TYPE_I64,
+				ValueLong: left.ValueLong + right.ValueLong,
+				Line:      expr.Line,
+				Column:    expr.Column,
+				Parser:    p,
+			}
+
+		case commons.TYPE_F32:
+			return &Expr{
+				Kind:       KIND_FLOAT,
+				Type:       commons.TYPE_F32,
+				ValueFloat: left.ValueFloat + right.ValueFloat,
+				Line:       expr.Line,
+				Column:     expr.Column,
+				Parser:     p,
+			}
+
+		case commons.TYPE_F64:
+			return &Expr{
+				Kind:        KIND_DOUBLE,
+				Type:        commons.TYPE_F64,
+				ValueDouble: left.ValueDouble + right.ValueDouble,
+				Line:        expr.Line,
+				Column:      expr.Column,
+				Parser:      p,
+			}
+		}
+
+	case KIND_SUB:
+		left := p.evalConst(expr.Children[0])
+		right := p.evalConst(expr.Children[1])
+
+		switch expr.Type {
+		case commons.TYPE_I32:
+			return p.newConstInt(
+				left.ValueInt-right.ValueInt,
+				expr,
+			)
+
+		case commons.TYPE_I64:
+			return p.newConstLong(
+				left.ValueLong-right.ValueLong,
+				expr,
+			)
+
+		case commons.TYPE_F32:
+			return p.newConstFloat(
+				left.ValueFloat-right.ValueFloat,
+				expr,
+			)
+
+		case commons.TYPE_F64:
+			return p.newConstDouble(
+				left.ValueDouble-right.ValueDouble,
+				expr,
+			)
+		}
+
+	case KIND_MUL:
+		left := p.evalConst(expr.Children[0])
+		right := p.evalConst(expr.Children[1])
+
+		switch expr.Type {
+		case commons.TYPE_I32:
+			return p.newConstInt(
+				left.ValueInt*right.ValueInt,
+				expr,
+			)
+
+		case commons.TYPE_I64:
+			return p.newConstLong(
+				left.ValueLong*right.ValueLong,
+				expr,
+			)
+
+		case commons.TYPE_F32:
+			return p.newConstFloat(
+				left.ValueFloat*right.ValueFloat,
+				expr,
+			)
+
+		case commons.TYPE_F64:
+			return p.newConstDouble(
+				left.ValueDouble*right.ValueDouble,
+				expr,
+			)
+		}
+
+	case KIND_DIV:
+		left := p.evalConst(expr.Children[0])
+		right := p.evalConst(expr.Children[1])
+
+		switch expr.Type {
+		case commons.TYPE_I32:
+			if right.ValueInt == 0 {
+				commons.CrashOut(
+					"division by zero",
+					p.lexer.File_path,
+					expr.Line,
+					expr.Column,
+				)
+				os.Exit(1)
+			}
+
+			return p.newConstInt(
+				left.ValueInt/right.ValueInt,
+				expr,
+			)
+
+		case commons.TYPE_I64:
+			if right.ValueLong == 0 {
+				commons.CrashOut(
+					"division by zero",
+					p.lexer.File_path,
+					expr.Line,
+					expr.Column,
+				)
+				os.Exit(1)
+			}
+
+			return p.newConstLong(
+				left.ValueLong/right.ValueLong,
+				expr,
+			)
+
+		case commons.TYPE_F32:
+			return p.newConstFloat(
+				left.ValueFloat/right.ValueFloat,
+				expr,
+			)
+
+		case commons.TYPE_F64:
+			return p.newConstDouble(
+				left.ValueDouble/right.ValueDouble,
+				expr,
+			)
+		}
+
+	case KIND_MOD:
+		left := p.evalConst(expr.Children[0])
+		right := p.evalConst(expr.Children[1])
+
+		switch expr.Type {
+		case commons.TYPE_I32:
+			return p.newConstInt(
+				left.ValueInt%right.ValueInt,
+				expr,
+			)
+
+		case commons.TYPE_I64:
+			return p.newConstLong(
+				left.ValueLong%right.ValueLong,
+				expr,
+			)
+		}
+
+	case KIND_POW:
+		left := p.evalConst(expr.Children[0])
+		right := p.evalConst(expr.Children[1])
+
+		switch expr.Type {
+		case commons.TYPE_F32:
+			return p.newConstFloat(
+				float32(math.Pow(
+					float64(left.ValueFloat),
+					float64(right.ValueFloat),
+				)),
+				expr,
+			)
+
+		case commons.TYPE_F64:
+			return p.newConstDouble(
+				math.Pow(left.ValueDouble, right.ValueDouble),
+				expr,
+			)
+
+		default:
+			panic(fmt.Sprintf(
+				"invalid constant pow type %q",
+				expr.Type.String(),
+			))
+		}
+
+	case KIND_STRCAT:
+		left := p.evalConst(expr.Children[0])
+		right := p.evalConst(expr.Children[1])
+
+		if left.Type != commons.TYPE_STRING || right.Type != commons.TYPE_STRING {
+			panic("invalid constant string concatenation")
+		}
+
+		return p.newConstString(
+			left.ValueString+right.ValueString,
+			expr,
+		)
+
+	case KIND_CAST:
+		value := p.evalConst(expr.Children[0])
+
+		switch expr.Type {
+		case commons.TYPE_I32:
+			switch value.Type {
+			case commons.TYPE_I64:
+				return p.newConstInt(int32(value.ValueLong), expr)
+			case commons.TYPE_F32:
+				return p.newConstInt(int32(value.ValueFloat), expr)
+			case commons.TYPE_F64:
+				return p.newConstInt(int32(value.ValueDouble), expr)
+			}
+
+		case commons.TYPE_I64:
+			switch value.Type {
+			case commons.TYPE_I32:
+				return p.newConstLong(int64(value.ValueInt), expr)
+			case commons.TYPE_F32:
+				return p.newConstLong(int64(value.ValueFloat), expr)
+			case commons.TYPE_F64:
+				return p.newConstLong(int64(value.ValueDouble), expr)
+			}
+
+		case commons.TYPE_F32:
+			switch value.Type {
+			case commons.TYPE_I32:
+				return p.newConstFloat(float32(value.ValueInt), expr)
+			case commons.TYPE_I64:
+				return p.newConstFloat(float32(value.ValueLong), expr)
+			case commons.TYPE_F64:
+				return p.newConstFloat(float32(value.ValueDouble), expr)
+			}
+
+		case commons.TYPE_F64:
+			switch value.Type {
+			case commons.TYPE_I32:
+				return p.newConstDouble(float64(value.ValueInt), expr)
+			case commons.TYPE_I64:
+				return p.newConstDouble(float64(value.ValueLong), expr)
+			case commons.TYPE_F32:
+				return p.newConstDouble(float64(value.ValueFloat), expr)
+			}
+
+		case commons.TYPE_STRING:
+			switch value.Type {
+			case commons.TYPE_I32:
+				return p.newConstString(fmt.Sprintf("%d", value.ValueInt), expr)
+			case commons.TYPE_I64:
+				return p.newConstString(fmt.Sprintf("%d", value.ValueLong), expr)
+			case commons.TYPE_F32:
+				return p.newConstString(fmt.Sprintf("%f", value.ValueFloat), expr)
+			case commons.TYPE_F64:
+				return p.newConstString(fmt.Sprintf("%f", value.ValueDouble), expr)
+			}
+
+		default:
+			commons.CrashOut(fmt.Sprintf(
+				"compile-time cast not supported from type %q to type %q",
+				value.Type.String(),
+				expr.Type.String(),
+			), p.lexer.File_path, expr.Line, expr.Column)
+			os.Exit(1)
+		}
+	}
+
+	commons.CrashOut(fmt.Sprintf(
+		"cannot evaluate compile-time expression %q",
+		expr.Kind.String(),
+	), p.lexer.File_path, expr.Line, expr.Column)
+	os.Exit(1)
+
+	panic("UNREACHABLE")
+}
+
+func (p *Parser) parseConstSet(name lexer.Token) *Expr {
+	p.expectKind(lexer.TOKEN_COLON)
+	p.expectKind(lexer.TOKEN_COLON)
+
+	if _, exists := p.Symbols[name.Val_string]; exists {
+		commons.CrashOut(
+			fmt.Sprintf(
+				"constant symbol %q already exists",
+				name.Val_string,
+			),
+			p.lexer.File_path,
+			name.Line,
+			name.Column,
+		)
+		os.Exit(1)
+	}
+
+	p.newContext(p.CurrentContext, &Context{
+		Kind:    CONTEXT_CONSTSET,
+		Type:    commons.TYPE_UNDEFINED,
+		VarName: name.Val_string,
+	})
+
+	value := p.parseExpression()
+
+	if !value.IsConstant() {
+		commons.CrashOut(
+			"constant expression is not compile-time evaluable",
+			p.lexer.File_path,
+			value.Line,
+			value.Column,
+		)
+		os.Exit(1)
+	}
+
+	value = p.evalConst(value)
+
+	p.endContext()
+
+	value.checkType(
+		commons.TYPE_I32,
+		commons.TYPE_I64,
+		commons.TYPE_F32,
+		commons.TYPE_F64,
+		commons.TYPE_I16,
+		commons.TYPE_I8,
+		commons.TYPE_U16,
+		commons.TYPE_U8,
+		commons.TYPE_STRING,
+	)
+
+	p.Symbols[name.Val_string] = &Symbol{
+		Name:  name.Val_string,
+		Type:  value.Type,
+		Kind:  SYMBOL_CONST,
+		Value: value,
+	}
+
+	p.expectKind(lexer.TOKEN_ENDLINE)
+
+	expr := p.newExpr(
+		KIND_CONSTSET,
+		value.Type,
+		value,
+		value,
+	)
+
+	expr.ValueString = name.Val_string
+
+	return expr
+}
+
+//#endregion
 
 func (p *Parser) parseCast() *Expr {
 	Type := p.expectKind(lexer.TOKEN_TYPE)

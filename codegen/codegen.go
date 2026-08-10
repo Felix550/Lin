@@ -517,6 +517,26 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 	panic(fmt.Sprintf("CODEGEN: unknown expression %q", expr.Kind.String()))
 }
 
+func (g *Generator) collectUsedStrings(expr *parser.Expr, used map[int]struct{}) {
+	if expr == nil {
+		return
+	}
+
+	switch expr.Kind {
+	case parser.KIND_CONSTSET:
+		// for constants i don't need to generate this
+		return
+	case parser.KIND_STRING:
+		if expr.Type == commons.TYPE_STRING && expr.ValueLong >= 0 {
+			used[int(expr.ValueLong)] = struct{}{}
+		}
+	}
+
+	for _, child := range expr.Children {
+		g.collectUsedStrings(child, used)
+	}
+}
+
 func (g *Generator) Generate(expr *parser.Expr) string {
 	switch expr.Kind {
 
@@ -527,8 +547,14 @@ func (g *Generator) Generate(expr *parser.Expr) string {
 			g.Code += "data $w_fmt = { b \"%d\\n\", b 0 }\n"
 			g.Code += "data $s_fmt = { b \"%f\\n\", b 0 }\n"
 		}
+
+		usedStrings := make(map[int]struct{})
+		g.collectUsedStrings(expr, usedStrings)
+
 		for id, str := range expr.Parser.Strings {
-			g.Code += fmt.Sprintf("data $s_%d = { b \"%s\", b 0 }\n", id, str)
+			if _, ok := usedStrings[id]; ok {
+				g.Code += fmt.Sprintf("data $s_%d = { b \"%s\", b 0 }\n", id, str)
+			}
 		}
 		g.Code += "export function w $main() {\n@start\n"
 
@@ -616,6 +642,9 @@ func (g *Generator) Generate(expr *parser.Expr) string {
 	case parser.KIND_FREEARENA:
 		g.Code += "\tcall $lin_arena_free()\n"
 
+		return ""
+
+	case parser.KIND_CONSTSET:
 		return ""
 
 	}
