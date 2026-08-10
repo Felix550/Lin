@@ -1,7 +1,225 @@
-cac :: "hello " + string(3l) + "\n"
-dump cac
-set x, y, z = f64(69/2), 35, u8(255)
-dump "34.5 + 35 = " + string(x + y) + "\n"
-dump z
-set a = u8(i64(128)) ^ 2
-dump a
+# ==========================================
+# LIN (Logical INstruction) Showcase
+# ==========================================
+
+dump "=== LIN (Logical INstruction) - Showcase ===\n"
+
+# Constants
+
+dump "\n[Constants]\n"
+
+PI :: 3.1415926535
+GREETING :: "Hello"
+YEAR :: 2026
+
+dump "PI = " + string(PI) + "\n"
+dump "GREETING = " + GREETING + "\n"
+dump "YEAR = " + string(YEAR) + "\n"
+
+# Variable initialization
+
+dump "\n[Variable Initialization]\n"
+
+set name = "Felix"
+set age = 20
+set height = 1.80
+set counter = 5
+
+dump "name = " + name + "\n"
+dump "age = " + string(age) + "\n"
+dump "height = " + string(height) + "\n"
+dump "counter = " + string(counter) + "\n"
+
+# Basic arithmetic
+
+dump "\n[Basic Arithmetic]\n"
+
+set a = 10
+set b = 3
+
+set sum = a + b
+set difference = a - b
+set product = a * b
+set quotient = a / b
+set remainder = a % b
+
+dump "10 + 3 = " + string(sum) + "\n"
+dump "10 - 3 = " + string(difference) + "\n"
+dump "10 * 3 = " + string(product) + "\n"
+dump "10 / 3 = " + string(quotient) + "\n"
+dump "10 % 3 = " + string(remainder) + "\n"
+
+# Floating point arithmetic
+
+dump "\n[Floating Point Arithmetic]\n"
+
+set radius = 5.0
+set area = PI * radius * radius
+
+dump "radius = " + string(radius) + "\n"
+dump "area = PI * radius² = " + string(area) + "\n"
+
+# Explicit casts
+
+dump "\n[Explicit Casts]\n"
+
+set integer = 42
+set decimal = f64(integer)
+set back = i64(decimal)
+
+dump "integer = " + string(integer) + "\n"
+dump "f64(integer) = " + string(decimal) + "\n"
+dump "i64(decimal) = " + string(back) + "\n"
+
+# String concatenation
+
+dump "\n[String Concatenation]\n"
+
+set message = GREETING + ", " + name + "!\n"
+
+dump message
+
+# String escaping
+
+dump "\n[String Escaping]\n"
+
+# Newline
+
+dump "\n[Newline]\n"
+dump "Line 1\nLine 2\nLine 3\n"
+
+# Tab
+
+dump "\n[Tab]\n"
+dump "Name:\tFelix\n"
+dump "Age:\t20\n"
+dump "Language:\tLIN\n"
+
+# Carriage return
+
+dump "\n[Carriage Return]\n"
+dump "Loading...\rDone!\n"
+
+# Backslash
+
+dump "\n[Backslash]\n"
+dump "C:\\Users\\Felix\\Documents\\LIN\n"
+
+# Quotes
+
+dump "\n[Quotes]\n"
+dump "He said: \"Hello, world!\"\n"
+
+# Multiple escapes
+
+dump "\n[Combined Escapes]\n"
+
+set message_escape = "Hello,\tUser!\nThis is a \"LIN\" string.\nPath: C:\\LIN\\projects\n"
+
+dump message_escape
+
+# Variables can be modified
+
+dump "\n[Mutable Variables]\n"
+
+set score = 100
+set label = "The final score is: "
+
+dump "initial score = " + string(score) + "\n"
+
+score += 50
+dump "score += 50 -> " + string(score) + "\n"
+
+score -= 10
+dump "score -= 10 -> " + string(score) + "\n"
+
+score *= 2
+dump "score *= 2 -> " + string(score) + "\n"
+
+score /= 4
+dump "score /= 4 -> " + string(score) + "\n"
+
+dump "initial label = \"" + label + "\"\n"
+label += string(score)
+dump "label += string(score) -> " + label + "\n"
+
+# Post-increment / post-decrement
+
+dump "\n[Post Increment / Decrement]\n"
+
+set level = 1
+
+dump "level = " + string(level) + "\n"
+
+level++
+dump "level++ -> " + string(level) + "\n"
+
+level++
+dump "level++ -> " + string(level) + "\n"
+
+level--
+dump "level-- -> " + string(level) + "\n"
+
+# Unary negation
+
+dump "\n[Unary Negation]\n"
+
+set negative = -42
+set negativeFloat = -3.14
+
+dump "-42 = " + string(negative) + "\n"
+dump "-3.14 = " + string(negativeFloat) + "\n"
+
+# Constant expressions
+
+dump "\n[Compile-Time Constants]\n"
+
+RESULT :: (10 + 20) * 3
+TEXT :: "Hello " + "World\n"
+
+dump "RESULT = " + string(RESULT) + "\n"
+dump "TEXT = " + TEXT
+
+# Power
+
+dump "\n[Power]\n"
+
+set p = 2
+set squared = p ^ 2
+set cubed = p ^ 3
+
+dump "2 ^ 2 = " + string(squared) + "\n"
+dump "2 ^ 3 = " + string(cubed) + "\n"
+
+# Mixed numeric types
+
+dump "\n[Mixed Numeric Types]\n"
+
+set i = 10
+set f = 2.5
+
+set mixed = i + f
+
+dump "10 + 2.5 = " + string(mixed) + "\n"
+
+# Multiple variable initialization
+
+dump "\n[Multiple Variable Initialization]\n"
+
+set x, y, z = 10, 20, 30
+
+dump "x = " + string(x) + "\n"
+dump "y = " + string(y) + "\n"
+dump "z = " + string(z) + "\n"
+
+# Final result
+
+dump "\n[Final Result]\n"
+
+set result = (x + y) * z
+
+dump "(10 + 20) * 30 = " + string(result) + "\n"
+
+dump "\n=== Showcase Complete ===\n"
+
+return 0

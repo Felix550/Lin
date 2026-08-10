@@ -495,6 +495,20 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 
 		return NewValue(tmp, expr.Type)
 
+	case parser.KIND_VARASSIGN:
+		value := g.GenerateExpr(expr.Children[0])
+
+		StoreType := g.getNumberExprStoreType(expr.Type)
+
+		g.Code += fmt.Sprintf(
+			"\tstore%s %s, %%%s\n",
+			StoreType,
+			value.String,
+			expr.ValueString,
+		)
+
+		return value
+
 	case parser.KIND_STRING:
 		return NewValue(fmt.Sprintf("$s_%d", expr.ValueLong), commons.TYPE_STRING)
 
@@ -512,6 +526,11 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 		)
 
 		return NewValue(tmp, commons.TYPE_STRING)
+
+	case parser.KIND_POSTINC, parser.KIND_POSTDEC:
+		oldValue := g.GenerateExpr(expr.Children[0])
+		g.GenerateExpr(expr.Children[1])
+		return oldValue
 	}
 
 	panic(fmt.Sprintf("CODEGEN: unknown expression %q", expr.Kind.String()))
@@ -624,21 +643,6 @@ func (g *Generator) Generate(expr *parser.Expr) string {
 
 		return ""
 
-	case parser.KIND_VARASSIGN:
-		value := g.GenerateExpr(expr.Children[0])
-
-		StoreType := g.getNumberExprStoreType(expr.Type)
-		name := expr.ValueString
-
-		g.Code += fmt.Sprintf(
-			"\tstore%s %s, %%%s\n",
-			StoreType,
-			value.String,
-			name,
-		)
-
-		return ""
-
 	case parser.KIND_FREEARENA:
 		g.Code += "\tcall $lin_arena_free()\n"
 
@@ -647,6 +651,9 @@ func (g *Generator) Generate(expr *parser.Expr) string {
 	case parser.KIND_CONSTSET:
 		return ""
 
+	case parser.KIND_POSTINC, parser.KIND_POSTDEC, parser.KIND_VARASSIGN:
+		g.GenerateExpr(expr)
+		return ""
 	}
 
 	panic(fmt.Sprintf("CODEGEN: unknown Kind: %q", expr.Kind.String()))

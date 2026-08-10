@@ -34,6 +34,8 @@ const (
 	KIND_VARASSIGN
 	KIND_STRCAT
 	KIND_NEG
+	KIND_POSTINC
+	KIND_POSTDEC
 )
 
 func (t ExprKind) String() string {
@@ -74,6 +76,10 @@ func (t ExprKind) String() string {
 		return "string concatenation"
 	case KIND_FREEARENA:
 		return "free arena"
+	case KIND_POSTINC:
+		return "postinc"
+	case KIND_POSTDEC:
+		return "postdec"
 	default:
 		return "unknown"
 	}
@@ -90,6 +96,7 @@ type ContextKind int
 
 const (
 	CONTEXT_VARSET ContextKind = iota
+	CONTEXT_BINOPASSIGN
 	CONTEXT_CONSTSET
 	CONTEXT_CAST
 	CONTEXT_ROOT
@@ -106,6 +113,7 @@ type Expr struct {
 	ValueInt    int32
 	ValueFloat  float32
 	ValueString string
+	ValueKind   ExprKind
 
 	Children []*Expr
 
@@ -136,6 +144,7 @@ type Parser struct {
 	lexer          *lexer.Lexer
 	Symbols        map[string]*Symbol
 	Strings        map[int]string
+	StringsLookup  map[string]int
 	HasDump        bool
 	HasReturn      bool
 	HasFreeArena   bool
@@ -157,6 +166,7 @@ func New(l *lexer.Lexer) *Parser {
 		HasFreeArena:   false,
 		Symbols:        make(map[string]*Symbol),
 		Strings:        make(map[int]string),
+		StringsLookup:  make(map[string]int),
 		StmtContexts:   []*Context{rootContext},
 		CurrentContext: rootContext,
 	}
@@ -310,12 +320,39 @@ func (p *Parser) expectType(expr *Expr, t commons.ExprType) {
 	}
 }
 
+func (p *Parser) getValueType(value any, Type commons.ExprType, root any) *Expr {
+	expr := p.newExpr(KIND_INT, Type, root)
+	switch Type {
+	case commons.TYPE_I32:
+		expr.Kind = KIND_INT
+		expr.ValueInt = int32(value.(int))
+	case commons.TYPE_I64:
+		expr.Kind = KIND_LONG
+		expr.ValueLong = int64(value.(int))
+	case commons.TYPE_F32:
+		expr.Kind = KIND_FLOAT
+		expr.ValueFloat = float32(value.(int))
+	case commons.TYPE_F64:
+		expr.Kind = KIND_DOUBLE
+		expr.ValueDouble = float64(value.(int))
+	default:
+		panic(fmt.Sprintf("can't generate value for type %q", Type.String()))
+	}
+	return expr
+}
+
 func (p *Parser) parseString() *Expr {
 	tok := p.expectKind(lexer.TOKEN_STRING)
 
-	id := len(p.Strings)
+	var id int
+	if str, exists := p.StringsLookup[tok.Val_string]; exists {
+		id = str
+	} else {
+		id = len(p.Strings)
 
-	p.Strings[id] = tok.Val_string
+		p.Strings[id] = tok.Val_string
+		p.StringsLookup[tok.Val_string] = id
+	}
 
 	expr := p.newExpr(KIND_STRING, commons.TYPE_STRING, tok)
 	expr.ValueString = tok.Val_string
@@ -372,12 +409,180 @@ func (p *Parser) parseAssign(id lexer.Token) *Expr {
 
 	value.checkType(symbol.Type)
 
-	p.expectKind(lexer.TOKEN_ENDLINE)
-
 	p.endContext()
 	expr := p.newExpr(KIND_VARASSIGN, symbol.Type, id, value)
 	expr.ValueString = symbol.Name
 	return expr
+}
+
+func (p *Parser) parseAssignmentBINOP(id lexer.Token) *Expr {
+	symbol, exists := p.Symbols[id.Val_string]
+
+	if !exists || symbol.Kind != SYMBOL_VAR {
+		commons.CrashOut(
+			fmt.Sprintf("symbol %q is not a variable", id.Val_string),
+			p.lexer.File_path,
+			id.Line,
+			id.Column,
+		)
+		os.Exit(1)
+	}
+
+	tk := p.lexer.NextToken()
+
+	var binopKind ExprKind
+
+	switch tk.Kind {
+	case lexer.TOKEN_PLUS_EQUAL:
+		binopKind = KIND_ADD
+	case lexer.TOKEN_MINUS_EQUAL:
+		binopKind = KIND_SUB
+	case lexer.TOKEN_MUL_EQUAL:
+		binopKind = KIND_MUL
+	case lexer.TOKEN_DIV_EQUAL:
+		binopKind = KIND_DIV
+	default:
+		commons.CrashOut(
+			fmt.Sprintf("unsupported assignment operator %q", tk.Kind.String()),
+			p.lexer.File_path,
+			id.Line,
+			id.Column,
+		)
+		os.Exit(1)
+	}
+
+	p.newContext(p.CurrentContext, &Context{
+		Kind:    CONTEXT_BINOPASSIGN,
+		Type:    symbol.Type,
+		VarName: symbol.Name,
+	})
+
+	value := p.implicitCast(p.parseExpression(), symbol.Type)
+	value.checkType(symbol.Type)
+
+	p.endContext()
+
+	left := p.newExpr(
+		KIND_VARGET,
+		symbol.Type,
+		id,
+	)
+	left.ValueString = symbol.Name
+
+	var right *Expr
+	switch symbol.Type {
+	case commons.TYPE_STRING:
+		if binopKind == KIND_ADD {
+			right = p.newExpr(KIND_STRCAT, commons.TYPE_STRING, id, left, value)
+
+		} else {
+			commons.CrashOut(
+				fmt.Sprintf(
+					"operator %q cannot be applied to type %q",
+					binopKind.String(),
+					symbol.Type.String(),
+				),
+				p.lexer.File_path,
+				id.Line,
+				id.Column,
+			)
+			os.Exit(1)
+		}
+	default:
+		right = p.newExpr(
+			binopKind,
+			symbol.Type,
+			id,
+			left,
+			value,
+		)
+	}
+
+	expr_assign := p.newExpr(
+		KIND_VARASSIGN,
+		symbol.Type,
+		id,
+		right,
+	)
+	expr_assign.ValueString = symbol.Name
+
+	return expr_assign
+}
+
+func (p *Parser) checkIncDecType(
+	Type commons.ExprType,
+	line int,
+	column int,
+) {
+	switch Type {
+	case commons.TYPE_I8,
+		commons.TYPE_U8,
+		commons.TYPE_I16,
+		commons.TYPE_U16,
+		commons.TYPE_I32,
+		commons.TYPE_I64,
+		commons.TYPE_F32,
+		commons.TYPE_F64:
+		return
+
+	default:
+		commons.CrashOut(
+			fmt.Sprintf(
+				"can't increment or decrement value of type %q",
+				Type.String(),
+			),
+			p.lexer.File_path,
+			line,
+			column,
+		)
+		os.Exit(1)
+	}
+}
+
+func (p *Parser) parsePostINCDEC(id lexer.Token) *Expr {
+	symbol, exists := p.Symbols[id.Val_string]
+	if !exists || symbol.Kind != SYMBOL_VAR {
+		commons.CrashOut(
+			fmt.Sprintf("symbol %q is not a variable", id.Val_string),
+			p.lexer.File_path,
+			id.Line,
+			id.Column,
+		)
+		os.Exit(1)
+	}
+
+	p.checkIncDecType(symbol.Type, id.Line, id.Column)
+
+	var incdecKind ExprKind
+	var postKind ExprKind
+	switch p.lexer.NextToken().Kind {
+	case lexer.TOKEN_INC:
+		incdecKind = KIND_ADD
+		postKind = KIND_POSTINC
+	case lexer.TOKEN_DEC:
+		incdecKind = KIND_SUB
+		postKind = KIND_POSTDEC
+	default:
+		commons.CrashOut(
+			"expected ++ or --",
+			p.lexer.File_path,
+			id.Line,
+			id.Column,
+		)
+		os.Exit(1)
+	}
+
+	value := p.getValueType(1, symbol.Type, id)
+
+	left := p.newExpr(KIND_VARGET, symbol.Type, id)
+	left.ValueString = symbol.Name
+
+	binop := p.newExpr(incdecKind, symbol.Type, id, left, value)
+
+	exprAssign := p.newExpr(KIND_VARASSIGN, symbol.Type, id, binop)
+	exprAssign.ValueString = symbol.Name
+
+	return p.newExpr(postKind, symbol.Type, id, left, exprAssign)
 }
 
 func (p *Parser) parseId() *Expr {
@@ -385,9 +590,40 @@ func (p *Parser) parseId() *Expr {
 
 	switch p.lexer.PeekToken().Kind {
 	case lexer.TOKEN_EQUAL:
+		if p.CurrentContext.Kind != CONTEXT_ROOT {
+			commons.CrashOut(
+				"assignment is not allowed in this context",
+				p.lexer.File_path,
+				id.Line,
+				id.Column,
+			)
+			os.Exit(1)
+		}
 		return p.parseAssign(id)
-	case lexer.TOKEN_COLON:
+	case lexer.TOKEN_DOUBLECOLON:
+		if p.CurrentContext.Kind != CONTEXT_ROOT {
+			commons.CrashOut(
+				"constant declaration is not allowed in this context",
+				p.lexer.File_path,
+				id.Line,
+				id.Column,
+			)
+			os.Exit(1)
+		}
 		return p.parseConstSet(id)
+	case lexer.TOKEN_PLUS_EQUAL, lexer.TOKEN_MINUS_EQUAL, lexer.TOKEN_DIV_EQUAL, lexer.TOKEN_MUL_EQUAL:
+		if p.CurrentContext.Kind != CONTEXT_ROOT {
+			commons.CrashOut(
+				"assignment is not allowed in this context",
+				p.lexer.File_path,
+				id.Line,
+				id.Column,
+			)
+			os.Exit(1)
+		}
+		return p.parseAssignmentBINOP(id)
+	case lexer.TOKEN_INC, lexer.TOKEN_DEC:
+		return p.parsePostINCDEC(id)
 	default:
 		symbol, exists := p.Symbols[id.Val_string]
 
@@ -579,31 +815,118 @@ func (p *Parser) implicitCast(expr *Expr, finalType commons.ExprType) *Expr {
 	return &Expr{}
 }
 
-func (p *Parser) parsePow() *Expr {
-	left := p.parsePrimary()
+func (p *Parser) parsePostfix() *Expr {
+	expr := p.parsePrimary()
 
-	for {
-		if p.lexer.PeekToken().Kind != lexer.TOKEN_POW {
-			return left
+	switch p.lexer.PeekToken().Kind {
+	case lexer.TOKEN_INC:
+		tok := p.expectKind(lexer.TOKEN_INC)
+
+		if expr.Kind != KIND_VARGET {
+			commons.CrashOut(
+				"operand of ++ must be a variable",
+				p.lexer.File_path,
+				tok.Line,
+				tok.Column,
+			)
+			os.Exit(1)
 		}
 
-		p.expectKind(lexer.TOKEN_POW)
+		p.checkIncDecType(expr.Type, tok.Line, tok.Column)
 
-		right := p.parseUnary()
+		one := p.getValueType(1, expr.Type, tok)
 
-		finalType := commons.TYPE_F64
+		increment := p.newExpr(
+			KIND_ADD,
+			expr.Type,
+			tok,
+			expr,
+			one,
+		)
 
-		left = p.implicitCast(left, finalType)
-		right = p.implicitCast(right, finalType)
+		assign := p.newExpr(
+			KIND_VARASSIGN,
+			expr.Type,
+			tok,
+			increment,
+		)
+		assign.ValueString = expr.ValueString
 
-		left = p.newExpr(
-			KIND_POW,
-			finalType,
-			left,
-			left,
-			right,
+		return p.newExpr(
+			KIND_POSTINC,
+			expr.Type,
+			tok,
+			expr,
+			assign,
+		)
+
+	case lexer.TOKEN_DEC:
+		tok := p.expectKind(lexer.TOKEN_DEC)
+
+		if expr.Kind != KIND_VARGET {
+			commons.CrashOut(
+				"operand of -- must be a variable",
+				p.lexer.File_path,
+				tok.Line,
+				tok.Column,
+			)
+			os.Exit(1)
+		}
+
+		p.checkIncDecType(expr.Type, tok.Line, tok.Column)
+
+		one := p.getValueType(1, expr.Type, tok)
+
+		decrement := p.newExpr(
+			KIND_SUB,
+			expr.Type,
+			tok,
+			expr,
+			one,
+		)
+
+		assign := p.newExpr(
+			KIND_VARASSIGN,
+			expr.Type,
+			tok,
+			decrement,
+		)
+		assign.ValueString = expr.ValueString
+
+		return p.newExpr(
+			KIND_POSTDEC,
+			expr.Type,
+			tok,
+			expr,
+			assign,
 		)
 	}
+
+	return expr
+}
+
+func (p *Parser) parsePow() *Expr {
+	left := p.parsePostfix()
+
+	if p.lexer.PeekToken().Kind != lexer.TOKEN_POW {
+		return left
+	}
+
+	tok := p.expectKind(lexer.TOKEN_POW)
+	right := p.parseUnary()
+
+	finalType := commons.TYPE_F64
+
+	left = p.implicitCast(left, finalType)
+	right = p.implicitCast(right, finalType)
+
+	return p.newExpr(
+		KIND_POW,
+		finalType,
+		tok,
+		left,
+		right,
+	)
 }
 
 func (p *Parser) parseMulDivMod() *Expr {
@@ -976,8 +1299,15 @@ func (p *Parser) newConstDouble(value float64, root *Expr) *Expr {
 }
 
 func (p *Parser) newConstString(value string, root *Expr) *Expr {
-	id := len(p.Strings)
-	p.Strings[id] = value
+	var id int
+	if str, exists := p.StringsLookup[value]; exists {
+		id = str
+	} else {
+		id = len(p.Strings)
+
+		p.Strings[id] = value
+		p.StringsLookup[value] = id
+	}
 
 	return &Expr{
 		Kind:        KIND_STRING,
@@ -1169,12 +1499,30 @@ func (p *Parser) evalConst(expr *Expr) *Expr {
 
 		switch expr.Type {
 		case commons.TYPE_I32:
+			if right.ValueInt == 0 {
+				commons.CrashOut(
+					"division by zero",
+					p.lexer.File_path,
+					expr.Line,
+					expr.Column,
+				)
+				os.Exit(1)
+			}
 			return p.newConstInt(
 				left.ValueInt%right.ValueInt,
 				expr,
 			)
 
 		case commons.TYPE_I64:
+			if right.ValueLong == 0 {
+				commons.CrashOut(
+					"division by zero",
+					p.lexer.File_path,
+					expr.Line,
+					expr.Column,
+				)
+				os.Exit(1)
+			}
 			return p.newConstLong(
 				left.ValueLong%right.ValueLong,
 				expr,
@@ -1297,8 +1645,7 @@ func (p *Parser) evalConst(expr *Expr) *Expr {
 }
 
 func (p *Parser) parseConstSet(name lexer.Token) *Expr {
-	p.expectKind(lexer.TOKEN_COLON)
-	p.expectKind(lexer.TOKEN_COLON)
+	p.expectKind(lexer.TOKEN_DOUBLECOLON)
 
 	if _, exists := p.Symbols[name.Val_string]; exists {
 		commons.CrashOut(
@@ -1354,8 +1701,6 @@ func (p *Parser) parseConstSet(name lexer.Token) *Expr {
 		Value: value,
 	}
 
-	p.expectKind(lexer.TOKEN_ENDLINE)
-
 	expr := p.newExpr(
 		KIND_CONSTSET,
 		value.Type,
@@ -1400,6 +1745,39 @@ func (p *Parser) parseCast() *Expr {
 	)
 }
 
+func (p *Parser) parseStatement() []*Expr {
+	switch p.lexer.PeekToken().Kind {
+
+	case lexer.TOKEN_RETURN:
+		p.HasReturn = true
+		return []*Expr{p.parseReturn()}
+
+	case lexer.TOKEN_DUMP:
+		return []*Expr{p.parseDump()}
+
+	case lexer.TOKEN_SET:
+		return p.parseSet()
+
+	case lexer.TOKEN_ID:
+		expr := p.parseExpression()
+		p.expectKind(lexer.TOKEN_ENDLINE)
+		return []*Expr{expr}
+
+	default:
+		tok := p.lexer.NextToken()
+
+		commons.CrashOut(
+			fmt.Sprintf("statement: unexpected %q", tok.Kind.String()),
+			p.lexer.File_path,
+			tok.Line,
+			tok.Column,
+		)
+		os.Exit(1)
+	}
+
+	return nil
+}
+
 func (p *Parser) Parse() *Expr {
 	root := &Expr{
 		Kind:   KIND_PROGRAM,
@@ -1408,42 +1786,14 @@ func (p *Parser) Parse() *Expr {
 	p.Root = root
 
 	for {
-		tok := p.lexer.PeekToken()
-
-		switch tok.Kind {
-
-		case lexer.TOKEN_RETURN:
-			p.HasReturn = true
-			root.Children = append(
-				root.Children,
-				p.parseReturn(),
-			)
-
-		case lexer.TOKEN_DUMP:
-			root.Children = append(
-				root.Children,
-				p.parseDump(),
-			)
-
-		case lexer.TOKEN_SET:
-			root.Children = append(
-				root.Children,
-				p.parseSet()...,
-			)
-
-		case lexer.TOKEN_ID:
-			root.Children = append(
-				root.Children,
-				p.parseId(),
-			)
-
-		case lexer.TOKEN_EOF:
+		if p.lexer.PeekToken().Kind == lexer.TOKEN_EOF {
 			if !p.HasFreeArena {
 				root.Children = append(
 					root.Children,
 					p.freeArena(),
 				)
 			}
+
 			if !p.HasReturn {
 				root.Children = append(
 					root.Children,
@@ -1452,10 +1802,11 @@ func (p *Parser) Parse() *Expr {
 			}
 
 			return root
-
-		default:
-			commons.CrashOut(fmt.Sprintf("top: unexpected %q", tok.Kind.String()), p.lexer.File_path, tok.Line, tok.Column)
-			os.Exit(1)
 		}
+
+		root.Children = append(
+			root.Children,
+			p.parseStatement()...,
+		)
 	}
 }

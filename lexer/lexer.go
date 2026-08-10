@@ -1,6 +1,7 @@
 package lexer
 
 import (
+	"fmt"
 	"lin/commons"
 	"os"
 	"strconv"
@@ -18,7 +19,6 @@ const (
 	TOKEN_I32
 	TOKEN_F64
 	TOKEN_F32
-
 	TOKEN_STRING
 
 	//Keywords
@@ -41,12 +41,21 @@ const (
 	TOKEN_DIV
 	TOKEN_POW
 	TOKEN_MOD
-	TOKEN_COLON
 	TOKEN_INC
 	TOKEN_DEC
 
+	//Assignment BINOP
+	TOKEN_PLUS_EQUAL
+	TOKEN_MUL_EQUAL
+	TOKEN_MINUS_EQUAL
+	TOKEN_DIV_EQUAL
+
 	//Types
 	TOKEN_TYPE
+
+	//Grammar
+	TOKEN_COLON
+	TOKEN_DOUBLECOLON
 )
 
 func (t TokenKind) String() string {
@@ -97,6 +106,22 @@ func (t TokenKind) String() string {
 		return "cast"
 	case TOKEN_TYPE:
 		return "type"
+	case TOKEN_PLUS_EQUAL:
+		return "+="
+	case TOKEN_MUL_EQUAL:
+		return "*="
+	case TOKEN_MINUS_EQUAL:
+		return "-="
+	case TOKEN_DIV_EQUAL:
+		return "/="
+	case TOKEN_INC:
+		return "inc (++)"
+	case TOKEN_DEC:
+		return "dec (--)"
+	case TOKEN_DOUBLECOLON:
+		return "::"
+	case TOKEN_COLON:
+		return ":"
 	default:
 		return "unknown"
 	}
@@ -209,12 +234,6 @@ func (l *Lexer) identifier() Token {
 			Line: l.line})
 	case "string":
 		return l.emit(Token{Kind: TOKEN_TYPE, Val_type: commons.TYPE_STRING, Lexeme: lexeme, Column: start_col,
-			Line: l.line})
-	case "++":
-		return l.emit(Token{Kind: TOKEN_INC, Lexeme: lexeme, Column: start_col,
-			Line: l.line})
-	case "--":
-		return l.emit(Token{Kind: TOKEN_TYPE, Lexeme: lexeme, Column: start_col,
 			Line: l.line})
 	}
 
@@ -563,20 +582,57 @@ func (l *Lexer) NextToken() Token {
 		l.parenDepth--
 		return l.emit(Token{Kind: TOKEN_RPAREN, Lexeme: ")", Line: l.line, Column: start_col})
 	case '+':
+		switch l.peek() {
+		case '=':
+			l.next()
+			return l.emit(Token{Kind: TOKEN_PLUS_EQUAL, Lexeme: "+=", Line: l.line, Column: start_col})
+		case '+':
+			l.next()
+			return l.emit(Token{Kind: TOKEN_INC, Lexeme: "++", Line: l.line, Column: start_col})
+		}
 		return l.emit(Token{Kind: TOKEN_PLUS, Lexeme: "+", Line: l.line, Column: start_col})
-	case '*':
-		return l.emit(Token{Kind: TOKEN_MUL, Lexeme: "*", Line: l.line, Column: start_col})
 	case '-':
+		switch l.peek() {
+		case '=':
+			l.next()
+			return l.emit(Token{Kind: TOKEN_MINUS_EQUAL, Lexeme: "-=", Line: l.line, Column: start_col})
+		case '-':
+			l.next()
+			return l.emit(Token{Kind: TOKEN_DEC, Lexeme: "--", Line: l.line, Column: start_col})
+		}
 		return l.emit(Token{Kind: TOKEN_MINUS, Lexeme: "-", Line: l.line, Column: start_col})
+	case '*':
+		if l.peek() == '=' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_MUL_EQUAL, Lexeme: "*=", Line: l.line, Column: start_col})
+		}
+		return l.emit(Token{Kind: TOKEN_MUL, Lexeme: "*", Line: l.line, Column: start_col})
 	case '/':
+		if l.peek() == '=' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_DIV_EQUAL, Lexeme: "/=", Line: l.line, Column: start_col})
+		}
 		return l.emit(Token{Kind: TOKEN_DIV, Lexeme: "/", Line: l.line, Column: start_col})
 	case '^':
 		return l.emit(Token{Kind: TOKEN_POW, Lexeme: "^", Line: l.line, Column: start_col})
 	case '%':
 		return l.emit(Token{Kind: TOKEN_MOD, Lexeme: "%", Line: l.line, Column: start_col})
 	case ':':
+		if l.peek() == ':' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_DOUBLECOLON, Lexeme: "::", Line: l.line, Column: start_col})
+		}
 		return l.emit(Token{Kind: TOKEN_COLON, Lexeme: ":", Line: l.line, Column: start_col})
 	}
+
+	ch := l.peek()
+	commons.CrashOut(
+		fmt.Sprintf("Lexer ERROR: unexpected character %q", ch),
+		l.File_path,
+		l.line,
+		l.column,
+	)
+	os.Exit(1)
 
 	return l.emit(Token{})
 }
