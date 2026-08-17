@@ -495,6 +495,28 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 
 		return NewValue(tmp, expr.Type)
 
+	case parser.KIND_VARSLICEGET:
+		Type := g.getNumberExprType(expr.Type)
+		LoadType := g.getNumberExprLoadType(expr.Type)
+		Size := g.getNumberExprSize(expr.Type)
+		idx := expr.ValueInt
+
+		tmp_ptr := g.newTemp("l")
+		tmp_val := g.newTemp(Type)
+
+		g.Code += fmt.Sprintf(
+			"\t%s =l add %%%s, %d\n\t%s = %s load%s %s\n",
+			tmp_ptr,
+			expr.ValueString,
+			Size*int(idx),
+			tmp_val,
+			Type,
+			LoadType,
+			tmp_ptr,
+		)
+
+		return NewValue(tmp_val, expr.Type)
+
 	case parser.KIND_VARASSIGN:
 		value := g.GenerateExpr(expr.Children[0])
 
@@ -509,7 +531,31 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 
 		return value
 
+	case parser.KIND_VARSLICEASSIGN:
+		value := g.GenerateExpr(expr.Children[0])
+
+		StoreType := g.getNumberExprStoreType(expr.Type)
+		Size := g.getNumberExprSize(expr.Type)
+		idx := expr.ValueInt
+
+		tmp_ptr := g.newTemp("l")
+
+		g.Code += fmt.Sprintf(
+			"\t%s =l add %%%s, %d\n\tstore%s %s, %s\n",
+			tmp_ptr,
+			expr.ValueString,
+			Size*int(idx),
+			StoreType,
+			value.String,
+			tmp_ptr,
+		)
+
+		return value
+
 	case parser.KIND_STRING:
+		if expr.ValueLong < 0 {
+			return NewValue("0", commons.TYPE_STRING)
+		}
 		return NewValue(fmt.Sprintf("$s_%d", expr.ValueLong), commons.TYPE_STRING)
 
 	case parser.KIND_STRCAT:
@@ -625,6 +671,36 @@ func (g *Generator) Generate(expr *parser.Expr) string {
 		}
 
 	case parser.KIND_VARINIT:
+		if expr.Type == commons.TYPE_ARRAY {
+			StoreType := g.getNumberExprStoreType(expr.ValueType)
+			ElementSize := g.getNumberExprSize(expr.ValueType)
+			ArraySize := int(expr.ValueInt)
+			name := expr.ValueString
+
+			g.Code += fmt.Sprintf(
+				"\t%%%s = l alloc%d %d\n",
+				name,
+				ElementSize,
+				ArraySize*ElementSize,
+			)
+
+			for idx, childExpr := range expr.Children {
+				child := g.GenerateExpr(childExpr)
+				tmp := g.newTemp("l")
+				g.Code += fmt.Sprintf(
+					"\t%s = l add %%%s, %d\n\tstore%s %s, %s\n",
+					tmp,
+					name,
+					idx*ElementSize,
+					StoreType,
+					child.String,
+					tmp,
+				)
+			}
+
+			return ""
+		}
+
 		value := g.GenerateExpr(expr.Children[0])
 
 		StoreType := g.getNumberExprStoreType(expr.Type)
@@ -651,7 +727,7 @@ func (g *Generator) Generate(expr *parser.Expr) string {
 	case parser.KIND_CONSTSET:
 		return ""
 
-	case parser.KIND_POSTINC, parser.KIND_POSTDEC, parser.KIND_VARASSIGN:
+	case parser.KIND_POSTINC, parser.KIND_POSTDEC, parser.KIND_VARASSIGN, parser.KIND_VARSLICEASSIGN:
 		g.GenerateExpr(expr)
 		return ""
 	}

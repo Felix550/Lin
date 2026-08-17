@@ -29,8 +29,10 @@ const (
 
 	// Del
 	TOKEN_ENDLINE
-	TOKEN_LPAREN
-	TOKEN_RPAREN
+	TOKEN_LRPAREN
+	TOKEN_RRPAREN
+	TOKEN_LSPAREN
+	TOKEN_RSPAREN
 	TOKEN_COMMA
 	TOKEN_EQUAL
 
@@ -80,10 +82,14 @@ func (t TokenKind) String() string {
 		return "dump"
 	case TOKEN_ENDLINE:
 		return "endline"
-	case TOKEN_LPAREN:
+	case TOKEN_LRPAREN:
 		return "("
-	case TOKEN_RPAREN:
+	case TOKEN_RRPAREN:
 		return ")"
+	case TOKEN_LSPAREN:
+		return "["
+	case TOKEN_RSPAREN:
+		return "]"
 	case TOKEN_COMMA:
 		return ","
 	case TOKEN_PLUS:
@@ -577,10 +583,14 @@ func (l *Lexer) NextToken() Token {
 		return l.emit(Token{Kind: TOKEN_EQUAL, Lexeme: "=", Line: l.line, Column: start_col})
 	case '(':
 		l.parenDepth++
-		return l.emit(Token{Kind: TOKEN_LPAREN, Lexeme: "(", Line: l.line, Column: start_col})
+		return l.emit(Token{Kind: TOKEN_LRPAREN, Lexeme: "(", Line: l.line, Column: start_col})
 	case ')':
 		l.parenDepth--
-		return l.emit(Token{Kind: TOKEN_RPAREN, Lexeme: ")", Line: l.line, Column: start_col})
+		return l.emit(Token{Kind: TOKEN_RRPAREN, Lexeme: ")", Line: l.line, Column: start_col})
+	case '[':
+		return l.emit(Token{Kind: TOKEN_LSPAREN, Lexeme: "[", Line: l.line, Column: start_col})
+	case ']':
+		return l.emit(Token{Kind: TOKEN_RSPAREN, Lexeme: "]", Line: l.line, Column: start_col})
 	case '+':
 		switch l.peek() {
 		case '=':

@@ -19,6 +19,7 @@ const (
 	TYPE_U8
 	TYPE_I16
 	TYPE_U16
+	TYPE_ARRAY
 )
 
 func (t ExprType) String() string {
@@ -45,6 +46,8 @@ func (t ExprType) String() string {
 		return "string"
 	case TYPE_UNDEFINED:
 		return "undefined"
+	case TYPE_ARRAY:
+		return "array"
 	default:
 		return "unknown"
 	}
