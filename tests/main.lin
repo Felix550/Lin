@@ -1,0 +1,6 @@
+set y = 2
+set x = qbe i32 <<QBE
+    %r = w add ${y}, 5
+    yield %r
+QBE
+dump x

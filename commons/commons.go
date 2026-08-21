@@ -5,6 +5,16 @@ import (
 	"path"
 )
 
+const (
+	Reset  = "\033[0m"
+	Red    = "\033[31m"
+	Green  = "\033[32m"
+	Yellow = "\033[33m"
+	Blue   = "\033[34m"
+	Cyan   = "\033[36m"
+	White  = "\033[37m"
+)
+
 type ExprType int
 
 const (
@@ -19,7 +29,15 @@ const (
 	TYPE_U8
 	TYPE_I16
 	TYPE_U16
+	TYPE_BOOL
 	TYPE_ARRAY
+)
+
+type CrashType int
+
+const (
+	CRASH_ERROR CrashType = iota
+	CRASH_WARN
 )
 
 func (t ExprType) String() string {
@@ -48,12 +66,20 @@ func (t ExprType) String() string {
 		return "undefined"
 	case TYPE_ARRAY:
 		return "array"
+	case TYPE_BOOL:
+		return "boolean"
 	default:
 		return "unknown"
 	}
 }
 
-func CrashOut(msg string, file_path string, line int, col int) {
+func CrashOut(msg string, file_path string, line int, col int, Typ CrashType) {
+	switch Typ {
+	case CRASH_ERROR:
+		fmt.Printf("%sERROR: %s", Red, Reset)
+	case CRASH_WARN:
+		fmt.Printf("%sWARN: %s", Yellow, Reset)
+	}
 	fmt.Printf("%s:%d:%d: %s\n", file_path, line, col, msg)
 }
 

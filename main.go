@@ -39,7 +39,7 @@ func main() {
 		}
 		filepath = flag.Arg(0)
 	} else {
-		filepath = "main.lin"
+		filepath = "tests/main.lin"
 	}
 
 	if *output == "" {
@@ -52,6 +52,15 @@ func main() {
 		os.Exit(1)
 	}
 	l := lexer.New(filepath, b)
+
+	//for {
+	//	kd := l.NextToken().Kind
+	//	fmt.Println(kd.String())
+	//	if kd == lexer.TOKEN_EOF{
+	//		break
+	//		os.Exit(1)
+	//	}
+	//}
 
 	p := parser.New(l)
 

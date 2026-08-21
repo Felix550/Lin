@@ -1,0 +1,20 @@
+set f = [1,2,3] # type: i32 size: 3
+set b[3] = [1] # type: i32 size: 3, [1..2] defaults to 0
+set a = 32f # type: float
+dump "--------------------\n"
+set x i32 # default: 0
+x++
+dump x # 1
+dump "--------------------\n"
+set y i32[2]
+y = [34,35]
+dump y[0] + y[1] # 69
+y = [52,52]
+dump y[0] + y[1] # 104
+y[0] = 23
+dump y[0] # 23
+dump y[1] # 52
+dump "--------------------\n"
+set z f32[1]
+z[0] = 2
+dump z[0] # 2.0

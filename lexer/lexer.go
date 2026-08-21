@@ -5,6 +5,7 @@ import (
 	"lin/commons"
 	"os"
 	"strconv"
+	"strings"
 	"unicode"
 )
 
@@ -26,6 +27,16 @@ const (
 	TOKEN_DUMP
 	TOKEN_SET
 	TOKEN_CAST
+	TOKEN_IF
+	TOKEN_ELSE
+	TOKEN_ELIF
+	TOKEN_THEN
+	TOKEN_END
+	TOKEN_WHILE
+	TOKEN_FOR
+	TOKEN_DO
+	TOKEN_QBE
+	TOKEN_RAW_QBE
 
 	// Del
 	TOKEN_ENDLINE
@@ -35,6 +46,7 @@ const (
 	TOKEN_RSPAREN
 	TOKEN_COMMA
 	TOKEN_EQUAL
+	TOKEN_LSHIFT
 
 	//BINOP
 	TOKEN_PLUS
@@ -54,10 +66,24 @@ const (
 
 	//Types
 	TOKEN_TYPE
+	TOKEN_TRUE
+	TOKEN_FALSE
 
 	//Grammar
 	TOKEN_COLON
 	TOKEN_DOUBLECOLON
+	TOKEN_SEMICOLON
+
+	//Boolean Algebra
+	TOKEN_GT
+	TOKEN_GE
+	TOKEN_LT
+	TOKEN_LE
+	TOKEN_EQ
+	TOKEN_NEQ
+	TOKEN_NOT
+	TOKEN_OR
+	TOKEN_AND
 )
 
 func (t TokenKind) String() string {
@@ -128,6 +154,50 @@ func (t TokenKind) String() string {
 		return "::"
 	case TOKEN_COLON:
 		return ":"
+	case TOKEN_TRUE:
+		return "true"
+	case TOKEN_FALSE:
+		return "false"
+	case TOKEN_IF:
+		return "if"
+	case TOKEN_THEN:
+		return "then"
+	case TOKEN_ELSE:
+		return "else"
+	case TOKEN_ELIF:
+		return "elif"
+	case TOKEN_END:
+		return "end"
+	case TOKEN_GT:
+		return ">"
+	case TOKEN_GE:
+		return ">="
+	case TOKEN_LT:
+		return "<"
+	case TOKEN_LE:
+		return "<="
+	case TOKEN_EQ:
+		return "=="
+	case TOKEN_NEQ:
+		return "!="
+	case TOKEN_NOT:
+		return "!"
+	case TOKEN_OR:
+		return "||"
+	case TOKEN_AND:
+		return "&&"
+	case TOKEN_DO:
+		return "do"
+	case TOKEN_QBE:
+		return "qbe"
+	case TOKEN_WHILE:
+		return "while"
+	case TOKEN_FOR:
+		return "for"
+	case TOKEN_SEMICOLON:
+		return ";"
+	case TOKEN_LSHIFT:
+		return "<<"
 	default:
 		return "unknown"
 	}
@@ -191,6 +261,24 @@ func isBINOP(ch byte) bool {
 	}
 }
 
+func (l *Lexer) continuesLine() bool {
+	switch l.peek() {
+	case '(':
+		return true
+
+	case ';':
+		return true
+
+	case '&':
+		return l.peekNext(1) == '&'
+
+	case '|':
+		return l.peekNext(1) == '|'
+	}
+
+	return isBINOP(l.peek())
+}
+
 func (l *Lexer) identifier() Token {
 	start_col := l.column
 	start := l.pos
@@ -241,6 +329,42 @@ func (l *Lexer) identifier() Token {
 	case "string":
 		return l.emit(Token{Kind: TOKEN_TYPE, Val_type: commons.TYPE_STRING, Lexeme: lexeme, Column: start_col,
 			Line: l.line})
+	case "bool":
+		return l.emit(Token{Kind: TOKEN_TYPE, Val_type: commons.TYPE_BOOL, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "true":
+		return l.emit(Token{Kind: TOKEN_TRUE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "false":
+		return l.emit(Token{Kind: TOKEN_FALSE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "if":
+		return l.emit(Token{Kind: TOKEN_IF, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "else":
+		return l.emit(Token{Kind: TOKEN_ELSE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "elif":
+		return l.emit(Token{Kind: TOKEN_ELIF, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "then":
+		return l.emit(Token{Kind: TOKEN_THEN, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "end":
+		return l.emit(Token{Kind: TOKEN_END, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "while":
+		return l.emit(Token{Kind: TOKEN_WHILE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "do":
+		return l.emit(Token{Kind: TOKEN_DO, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "for":
+		return l.emit(Token{Kind: TOKEN_FOR, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "qbe":
+		return l.emit(Token{Kind: TOKEN_QBE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
 	}
 
 	return l.emit(Token{
@@ -269,10 +393,11 @@ func (l *Lexer) number() Token {
 		if ch == '.' {
 			if has_decimal {
 				commons.CrashOut(
-					"Lexer ERROR: numbers can only have ONE decimal point",
+					"LEXER:numbers can only have ONE decimal point",
 					l.File_path,
 					l.line,
 					start_col,
+					commons.CRASH_ERROR,
 				)
 				os.Exit(1)
 			}
@@ -356,10 +481,11 @@ func (l *Lexer) string() Token {
 
 		if ch == 0 || ch == '\n' || ch == '\r' {
 			commons.CrashOut(
-				"Lexer ERROR: Unmatched quotes on String literal",
+				"LEXER:Unmatched quotes on String literal",
 				l.File_path,
 				l.line,
 				start_col,
+				commons.CRASH_ERROR,
 			)
 			os.Exit(1)
 		}
@@ -374,10 +500,11 @@ func (l *Lexer) string() Token {
 
 			if l.peek() == 0 {
 				commons.CrashOut(
-					"Lexer ERROR: Invalid escape sequence",
+					"LEXER:Invalid escape sequence",
 					l.File_path,
 					l.line,
 					l.column,
+					commons.CRASH_ERROR,
 				)
 				os.Exit(1)
 			}
@@ -460,6 +587,46 @@ func (l *Lexer) emit(tok Token) Token {
 	return tok
 }
 
+func (l *Lexer) ReadRawQBE() Token {
+	startLine, startColumn := l.line, l.column
+	l.skipWhitespace()
+
+	start := l.pos
+	for isLetter(l.peek()) || isDigit(l.peek()) || isValidIDChar(l.peek()) {
+		l.next()
+	}
+	delimiter := string(l.src[start:l.pos])
+	if delimiter == "" {
+		commons.CrashOut("LEXER: expected a QBE heredoc delimiter", l.File_path, l.line, l.column, commons.CRASH_ERROR)
+		os.Exit(1)
+	}
+
+	for l.peek() != 0 && l.peek() != '\n' {
+		l.next()
+	}
+	if l.peek() == '\n' {
+		l.next()
+	}
+
+	bodyStart := l.pos
+	for {
+		lineStart := l.pos
+		for l.peek() != 0 && l.peek() != '\n' {
+			l.next()
+		}
+		line := string(l.src[lineStart:l.pos])
+		if strings.TrimSpace(line) == delimiter {
+			body := string(l.src[bodyStart:lineStart])
+			return l.emit(Token{Kind: TOKEN_RAW_QBE, Val_string: body, Line: startLine, Column: startColumn})
+		}
+		if l.peek() == 0 {
+			commons.CrashOut(fmt.Sprintf("LEXER: unterminated QBE block, expected %q", delimiter), l.File_path, startLine, startColumn, commons.CRASH_ERROR)
+			os.Exit(1)
+		}
+		l.next()
+	}
+}
+
 func (l *Lexer) skipWhitespace() {
 	for {
 		switch l.peek() {
@@ -485,8 +652,10 @@ func (l *Lexer) skipComment() {
 	}
 }
 
-func (l *Lexer) skipBlankLines() bool {
+func (l *Lexer) skipBlankLines() (bool, int, int) {
 	found := false
+	line := 0
+	column := 0
 
 	for {
 		l.skipWhitespace()
@@ -497,6 +666,11 @@ func (l *Lexer) skipBlankLines() bool {
 		}
 
 		if l.peek() == '\n' {
+			if !found {
+				line = l.line
+				column = l.column
+			}
+
 			found = true
 			l.next()
 			continue
@@ -505,7 +679,7 @@ func (l *Lexer) skipBlankLines() bool {
 		break
 	}
 
-	return found
+	return found, line, column
 }
 
 func (l *Lexer) PeekToken() Token {
@@ -524,28 +698,17 @@ func (l *Lexer) NextToken() Token {
 		return tok
 	}
 
-	if l.skipBlankLines() {
+	if found, line, column := l.skipBlankLines(); found {
 		if l.has_lastToken &&
 			l.lastToken.Kind != TOKEN_ENDLINE &&
 			l.lastToken.Kind != TOKEN_EOF &&
-			l.peek() != 0 {
-			return l.emit(Token{
-				Kind: TOKEN_ENDLINE,
-			})
-		}
-	}
-
-	if l.peek() == '\n' {
-		for isWhitespace(l.peek()) {
-			l.next()
-		}
-
-		if l.lastToken.Kind != TOKEN_ENDLINE && l.has_lastToken && l.parenDepth == 0 && !isBINOP(l.peek()) {
+			l.peek() != 0 &&
+			!l.continuesLine() &&
+			l.parenDepth == 0 {
 			return l.emit(Token{
 				Kind:   TOKEN_ENDLINE,
-				Lexeme: "\n",
-				Line:   l.line,
-				Column: l.column,
+				Line:   line,
+				Column: column,
 			})
 		}
 	}
@@ -577,9 +740,16 @@ func (l *Lexer) NextToken() Token {
 
 	start_col := l.column
 	switch l.next() {
+	case ';':
+		return l.emit(Token{Kind: TOKEN_SEMICOLON, Lexeme: ";", Line: l.line, Column: start_col})
 	case ',':
 		return l.emit(Token{Kind: TOKEN_COMMA, Lexeme: ",", Line: l.line, Column: start_col})
 	case '=':
+		switch l.peek() {
+		case '=':
+			l.next()
+			return l.emit(Token{Kind: TOKEN_EQ, Lexeme: "==", Line: l.line, Column: start_col})
+		}
 		return l.emit(Token{Kind: TOKEN_EQUAL, Lexeme: "=", Line: l.line, Column: start_col})
 	case '(':
 		l.parenDepth++
@@ -633,14 +803,47 @@ func (l *Lexer) NextToken() Token {
 			return l.emit(Token{Kind: TOKEN_DOUBLECOLON, Lexeme: "::", Line: l.line, Column: start_col})
 		}
 		return l.emit(Token{Kind: TOKEN_COLON, Lexeme: ":", Line: l.line, Column: start_col})
+	case '>':
+		if l.peek() == '=' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_GE, Lexeme: ">=", Line: l.line, Column: start_col})
+		}
+		return l.emit(Token{Kind: TOKEN_GT, Lexeme: ">", Line: l.line, Column: start_col})
+	case '<':
+		if l.peek() == '<' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_LSHIFT, Lexeme: "<<", Line: l.line, Column: start_col})
+		}
+		if l.peek() == '=' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_LE, Lexeme: "<=", Line: l.line, Column: start_col})
+		}
+		return l.emit(Token{Kind: TOKEN_LT, Lexeme: ">", Line: l.line, Column: start_col})
+	case '!':
+		if l.peek() == '=' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_NEQ, Lexeme: "!=", Line: l.line, Column: start_col})
+		}
+		return l.emit(Token{Kind: TOKEN_NOT, Lexeme: "!", Line: l.line, Column: start_col})
+	case '|':
+		if l.peek() == '|' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_OR, Lexeme: "||", Line: l.line, Column: start_col})
+		}
+	case '&':
+		if l.peek() == '&' {
+			l.next()
+			return l.emit(Token{Kind: TOKEN_AND, Lexeme: "&&", Line: l.line, Column: start_col})
+		}
 	}
 
 	ch := l.peek()
 	commons.CrashOut(
-		fmt.Sprintf("Lexer ERROR: unexpected character %q", ch),
+		fmt.Sprintf("LEXER:unexpected character %q", ch),
 		l.File_path,
 		l.line,
 		l.column,
+		commons.CRASH_ERROR,
 	)
 	os.Exit(1)
 

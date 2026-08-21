@@ -40,6 +40,14 @@ char* dtoa(double a)
     return arena_sprintf(&arena,"%f",a);
 }
 
+int str_eq(const char *a, const char *b){
+    return strcmp(a, b) == 0;
+}
+
+int str_ne(const char *a, const char *b){
+    return strcmp(a, b) != 0;
+}
+
 void lin_arena_free(void){
     arena_free(&arena);
 }

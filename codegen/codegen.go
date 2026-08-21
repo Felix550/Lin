@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"lin/commons"
 	"lin/parser"
+	"strings"
 )
 
 type Generator struct {
-	NumTemp int
-	Code    string
+	NumTemp    int
+	Code       string
+	Terminated bool
 }
 
 type CastOp struct {
@@ -60,7 +62,7 @@ func (g *Generator) getNumberExprType(Type commons.ExprType) string {
 		return "d"
 	case commons.TYPE_I64, commons.TYPE_STRING:
 		return "l"
-	case commons.TYPE_I32, commons.TYPE_I16, commons.TYPE_U16, commons.TYPE_I8, commons.TYPE_U8:
+	case commons.TYPE_I32, commons.TYPE_I16, commons.TYPE_U16, commons.TYPE_I8, commons.TYPE_U8, commons.TYPE_BOOL:
 		return "w"
 	case commons.TYPE_F32:
 		return "s"
@@ -78,7 +80,7 @@ func (g *Generator) getNumberExprLoadType(Type commons.ExprType) string {
 		return "d"
 	case commons.TYPE_I64, commons.TYPE_STRING:
 		return "l"
-	case commons.TYPE_I32:
+	case commons.TYPE_I32, commons.TYPE_BOOL:
 		return "w"
 	case commons.TYPE_F32:
 		return "s"
@@ -98,13 +100,47 @@ func (g *Generator) getNumberExprLoadType(Type commons.ExprType) string {
 	}
 }
 
+func (g *Generator) getComparisonPrefixExprType(Type commons.ExprType) string {
+	switch Type {
+	case commons.TYPE_F64, commons.TYPE_F32:
+		return "c"
+	case commons.TYPE_I64, commons.TYPE_I32, commons.TYPE_I16, commons.TYPE_I8:
+		return "cs"
+	case commons.TYPE_U16, commons.TYPE_U8:
+		return "cu"
+	default:
+		panic(fmt.Sprintf(
+			"unsupported comparison type %q",
+			Type.String(),
+		))
+	}
+}
+
+func (g *Generator) getComparisonExprKind(Kind parser.ExprKind) string {
+	switch Kind {
+	case parser.KIND_GT:
+		return "gt"
+	case parser.KIND_GE:
+		return "ge"
+	case parser.KIND_LT:
+		return "lt"
+	case parser.KIND_LE:
+		return "le"
+	default:
+		panic(fmt.Sprintf(
+			"unsupported comparison type %q",
+			Kind.String(),
+		))
+	}
+}
+
 func (g *Generator) getNumberExprStoreType(Type commons.ExprType) string {
 	switch Type {
 	case commons.TYPE_F64:
 		return "d"
 	case commons.TYPE_I64, commons.TYPE_STRING:
 		return "l"
-	case commons.TYPE_I32:
+	case commons.TYPE_I32, commons.TYPE_BOOL:
 		return "w"
 	case commons.TYPE_F32:
 		return "s"
@@ -130,7 +166,7 @@ func (g *Generator) getNumberExprSize(Type commons.ExprType) int {
 		return 8
 	case commons.TYPE_I64, commons.TYPE_STRING:
 		return 8
-	case commons.TYPE_I32:
+	case commons.TYPE_I32, commons.TYPE_BOOL:
 		return 4
 	case commons.TYPE_F32:
 		return 4
@@ -246,8 +282,52 @@ func (g *Generator) emitCast(from, to commons.ExprType, value Value) Value {
 	return NewValue(result, to)
 }
 
+func (g *Generator) rawCaptureValue(sym *parser.Symbol) Value {
+	if sym.Kind == parser.SYMBOL_CONST {
+		return g.GenerateExpr(sym.Value)
+	}
+
+	typ := g.getNumberExprType(sym.Type)
+	loadType := g.getNumberExprLoadType(sym.Type)
+	tmp := g.newTemp(typ)
+	g.Code += fmt.Sprintf("\t%s =%s load%s %%%s\n", tmp, typ, loadType, sym.Internal)
+	return NewValue(tmp, sym.Type)
+}
+
+func (g *Generator) expandRawQBE(source string, captures map[string]*parser.Symbol) string {
+	var out strings.Builder
+	for pos := 0; pos < len(source); {
+		start := strings.Index(source[pos:], "${")
+		if start < 0 {
+			out.WriteString(source[pos:])
+			break
+		}
+		start += pos
+		out.WriteString(source[pos:start])
+		end := strings.IndexByte(source[start+2:], '}')
+		if end < 0 {
+			panic("CODEGEN: unterminated raw QBE capture")
+		}
+		end += start + 2
+		name := source[start+2 : end]
+		sym, ok := captures[name]
+		if !ok {
+			panic(fmt.Sprintf("CODEGEN: unknown raw QBE capture %q", name))
+		}
+		out.WriteString(g.rawCaptureValue(sym).String)
+		pos = end + 1
+	}
+	return out.String()
+}
+
 func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 	switch expr.Kind {
+	case parser.KIND_RAW_QBE:
+		g.Code += g.expandRawQBE(expr.ValueString, expr.RawCaptures)
+		if !strings.HasSuffix(g.Code, "\n") {
+			g.Code += "\n"
+		}
+		return NewValue(g.expandRawQBE(expr.RawResult, expr.RawCaptures), expr.Type)
 
 	case parser.KIND_LONG:
 		return NewValue(fmt.Sprintf("%d", expr.ValueLong), commons.TYPE_I64)
@@ -490,7 +570,7 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 			tmp,
 			Type,
 			LoadType,
-			expr.ValueString,
+			expr.ValueSymbol.Internal,
 		)
 
 		return NewValue(tmp, expr.Type)
@@ -499,23 +579,90 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 		Type := g.getNumberExprType(expr.Type)
 		LoadType := g.getNumberExprLoadType(expr.Type)
 		Size := g.getNumberExprSize(expr.Type)
-		idx := expr.ValueInt
 
-		tmp_ptr := g.newTemp("l")
-		tmp_val := g.newTemp(Type)
-
+		index := g.GenerateExpr(expr.Children[0])
+		indexLong := g.newTemp("l")
 		g.Code += fmt.Sprintf(
-			"\t%s =l add %%%s, %d\n\t%s = %s load%s %s\n",
-			tmp_ptr,
-			expr.ValueString,
-			Size*int(idx),
-			tmp_val,
-			Type,
-			LoadType,
-			tmp_ptr,
+			"\t%s =l extuw %s\n",
+			indexLong,
+			index.String,
 		)
 
-		return NewValue(tmp_val, expr.Type)
+		elementSize := g.newTemp("l")
+		g.Code += fmt.Sprintf(
+			"\t%s =l mul %s, %d\n",
+			elementSize,
+			indexLong,
+			Size,
+		)
+
+		tmpPtr := g.newTemp("l")
+		g.Code += fmt.Sprintf(
+			"\t%s =l add %%%s, %s\n",
+			tmpPtr,
+			expr.ValueSymbol.Internal,
+			elementSize,
+		)
+
+		tmpVal := g.newTemp(Type)
+		g.Code += fmt.Sprintf(
+			"\t%s = %s load%s %s\n",
+			tmpVal,
+			Type,
+			LoadType,
+			tmpPtr,
+		)
+
+		return NewValue(tmpVal, expr.Type)
+
+	case parser.KIND_VARINIT:
+		if expr.Type == commons.TYPE_ARRAY {
+			StoreType := g.getNumberExprStoreType(expr.ValueType)
+			ElementSize := g.getNumberExprSize(expr.ValueType)
+			ArraySize := int(expr.ValueInt)
+			internal := expr.ValueSymbol.Internal
+
+			g.Code += fmt.Sprintf(
+				"\t%%%s = l alloc%d %d\n",
+				internal,
+				ElementSize,
+				ArraySize*ElementSize,
+			)
+
+			for idx, childExpr := range expr.Children {
+				child := g.GenerateExpr(childExpr)
+				tmp := g.newTemp("l")
+				g.Code += fmt.Sprintf(
+					"\t%s = l add %%%s, %d\n\tstore%s %s, %s\n",
+					tmp,
+					internal,
+					idx*ElementSize,
+					StoreType,
+					child.String,
+					tmp,
+				)
+			}
+
+			return NewValue("%"+internal, expr.Type)
+		}
+
+		value := g.GenerateExpr(expr.Children[0])
+
+		StoreType := g.getNumberExprStoreType(expr.Type)
+		Size := g.getNumberExprSize(expr.Type)
+		internal := expr.ValueSymbol.Internal
+
+		g.Code += fmt.Sprintf(
+			"\t%%%s = l alloc%d %d\n\tstore%s %s, %%%s\n",
+			internal,
+			Size,
+			Size,
+			StoreType,
+			value.String,
+			internal,
+		)
+
+		return NewValue("%"+internal, expr.Type)
 
 	case parser.KIND_VARASSIGN:
 		value := g.GenerateExpr(expr.Children[0])
@@ -526,28 +673,45 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 			"\tstore%s %s, %%%s\n",
 			StoreType,
 			value.String,
-			expr.ValueString,
+			expr.ValueSymbol.Internal,
 		)
 
 		return value
 
 	case parser.KIND_VARSLICEASSIGN:
-		value := g.GenerateExpr(expr.Children[0])
+		index := g.GenerateExpr(expr.Children[0])
+		value := g.GenerateExpr(expr.Children[1])
 
 		StoreType := g.getNumberExprStoreType(expr.Type)
 		Size := g.getNumberExprSize(expr.Type)
-		idx := expr.ValueInt
+		indexLong := g.newTemp("l")
+		g.Code += fmt.Sprintf(
+			"\t%s =l extuw %s\n",
+			indexLong,
+			index.String,
+		)
 
-		tmp_ptr := g.newTemp("l")
+		offset := g.newTemp("l")
+		g.Code += fmt.Sprintf(
+			"\t%s =l mul %s, %d\n",
+			offset,
+			indexLong,
+			Size,
+		)
+
+		tmpPtr := g.newTemp("l")
+		g.Code += fmt.Sprintf(
+			"\t%s =l add %%%s, %s\n",
+			tmpPtr,
+			expr.ValueSymbol.Internal,
+			offset,
+		)
 
 		g.Code += fmt.Sprintf(
-			"\t%s =l add %%%s, %d\n\tstore%s %s, %s\n",
-			tmp_ptr,
-			expr.ValueString,
-			Size*int(idx),
+			"\tstore%s %s, %s\n",
 			StoreType,
 			value.String,
-			tmp_ptr,
+			tmpPtr,
 		)
 
 		return value
@@ -557,6 +721,116 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 			return NewValue("0", commons.TYPE_STRING)
 		}
 		return NewValue(fmt.Sprintf("$s_%d", expr.ValueLong), commons.TYPE_STRING)
+
+	case parser.KIND_BOOL:
+		return NewValue(fmt.Sprintf("%d", expr.ValueInt), commons.TYPE_BOOL)
+
+	case parser.KIND_AND:
+		left := g.GenerateExpr(expr.Children[0])
+		right := g.GenerateExpr(expr.Children[1])
+		tmp := g.newTemp("w")
+		g.Code += fmt.Sprintf(
+			"\t%s = w and %s, %s\n",
+			tmp,
+			left.String,
+			right.String,
+		)
+		return NewValue(tmp, commons.TYPE_BOOL)
+
+	case parser.KIND_OR:
+		left := g.GenerateExpr(expr.Children[0])
+		right := g.GenerateExpr(expr.Children[1])
+		tmp := g.newTemp("w")
+		g.Code += fmt.Sprintf(
+			"\t%s = w or %s, %s\n",
+			tmp,
+			left.String,
+			right.String,
+		)
+		return NewValue(tmp, commons.TYPE_BOOL)
+
+	case parser.KIND_EQ:
+		left := g.GenerateExpr(expr.Children[0])
+		right := g.GenerateExpr(expr.Children[1])
+		tmp := g.newTemp("w")
+
+		//Basically i check this ahead in parsing, both left and right are the same type
+		if left.Type == commons.TYPE_STRING {
+			g.Code += fmt.Sprintf(
+				"\t%s = w call $str_eq(l %s, l %s)\n",
+				tmp,
+				left.String,
+				right.String,
+			)
+		} else {
+			finalType := g.getNumberExprType(left.Type)
+			g.Code += fmt.Sprintf(
+				"\t%s = w ceq%s %s, %s\n",
+				tmp,
+				finalType,
+				left.String,
+				right.String,
+			)
+		}
+		return NewValue(tmp, commons.TYPE_BOOL)
+
+	case parser.KIND_NEQ:
+		left := g.GenerateExpr(expr.Children[0])
+		right := g.GenerateExpr(expr.Children[1])
+		tmp := g.newTemp("w")
+
+		//Basically i check this ahead in parsing, both left and right are the same type
+		if left.Type == commons.TYPE_STRING {
+			g.Code += fmt.Sprintf(
+				"\t%s = w call $str_ne(l %s, l %s)\n",
+				tmp,
+				left.String,
+				right.String,
+			)
+		} else {
+			finalType := g.getNumberExprType(left.Type)
+			g.Code += fmt.Sprintf(
+				"\t%s = w cne%s %s, %s\n",
+				tmp,
+				finalType,
+				left.String,
+				right.String,
+			)
+		}
+		return NewValue(tmp, commons.TYPE_BOOL)
+
+	case parser.KIND_GT, parser.KIND_GE, parser.KIND_LT, parser.KIND_LE:
+		left := g.GenerateExpr(expr.Children[0])
+		right := g.GenerateExpr(expr.Children[1])
+		tmp := g.newTemp("w")
+
+		finalType := g.getNumberExprType(left.Type)
+		comparisonPrefix := g.getComparisonPrefixExprType(left.Type)
+		comparisonExpr := g.getComparisonExprKind(expr.Kind)
+
+		g.Code += fmt.Sprintf(
+			"\t%s = w %s%s%s %s, %s\n",
+			tmp,
+			comparisonPrefix,
+			comparisonExpr,
+			finalType,
+			left.String,
+			right.String,
+		)
+
+		return NewValue(tmp, commons.TYPE_BOOL)
+
+	case parser.KIND_NOT:
+		left := g.GenerateExpr(expr.Children[0])
+		tmp := g.newTemp("w")
+
+		g.Code += fmt.Sprintf(
+			"\t%s = w xor %s, 1\n",
+			tmp,
+			left.String,
+		)
+
+		return NewValue(tmp, commons.TYPE_BOOL)
 
 	case parser.KIND_STRCAT:
 		left := g.GenerateExpr(expr.Children[0])
@@ -572,6 +846,9 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 		)
 
 		return NewValue(tmp, commons.TYPE_STRING)
+
+	case parser.KIND_PREINC, parser.KIND_PREDEC:
+		return g.GenerateExpr(expr.Children[0])
 
 	case parser.KIND_POSTINC, parser.KIND_POSTDEC:
 		oldValue := g.GenerateExpr(expr.Children[0])
@@ -601,6 +878,185 @@ func (g *Generator) collectUsedStrings(expr *parser.Expr, used map[int]struct{})
 		g.collectUsedStrings(child, used)
 	}
 }
+func (g *Generator) GenerateStatement(expr *parser.Expr) bool {
+	switch expr.Kind {
+	case parser.KIND_RAW_QBE:
+		g.GenerateExpr(expr)
+		return false
+
+	case parser.KIND_RETURN:
+		value := g.GenerateExpr(expr.Children[0])
+
+		g.Code += fmt.Sprintf(
+			"\tret %s\n",
+			value.String,
+		)
+		g.Terminated = true
+		return true
+
+	case parser.KIND_DUMP:
+		value := g.GenerateExpr(expr.Children[0])
+
+		switch expr.Children[0].Type {
+		case commons.TYPE_STRING:
+
+			g.Code += fmt.Sprintf(
+				"\tcall $printf(l %s)\n",
+				value.String,
+			)
+
+			return false
+		default:
+			Type := g.getNumberExprType(expr.Children[0].Type)
+
+			if expr.Children[0].Type == commons.TYPE_F32 {
+				value = g.emitCast(commons.TYPE_F32, commons.TYPE_F64, value)
+				Type = "d"
+			}
+
+			g.Code += fmt.Sprintf(
+				"\tcall $printf(l $%s_fmt, ..., %s %s)\n",
+				Type,
+				Type,
+				value.String,
+			)
+
+			return false
+		}
+
+	case parser.KIND_FREEARENA:
+		g.Code += "\tcall $lin_arena_free()\n"
+
+		return false
+
+	case parser.KIND_CONSTSET:
+		return false
+
+	case parser.KIND_BODY:
+		for _, child := range expr.Children {
+			if g.GenerateStatement(child) {
+				return true
+			}
+		}
+
+		return false
+
+	case parser.KIND_IF:
+		cond := g.GenerateExpr(expr.Children[0])
+		thenBody := expr.Children[1]
+		id := expr.ID
+
+		elseLabel := fmt.Sprintf("@if_else_%d", id)
+		endLabel := fmt.Sprintf("@if_end_%d", id)
+		thenLabel := fmt.Sprintf("@if_then_%d", id)
+
+		if expr.HasElse {
+			g.Code += fmt.Sprintf(
+				"\tjnz %s, %s, %s\n",
+				cond.String,
+				thenLabel,
+				elseLabel,
+			)
+		} else {
+			g.Code += fmt.Sprintf(
+				"\tjnz %s, %s, %s\n",
+				cond.String,
+				thenLabel,
+				endLabel,
+			)
+		}
+
+		g.Code += thenLabel + "\n"
+
+		if !g.GenerateStatement(thenBody) {
+			g.Code += "\tjmp " + endLabel + "\n"
+		}
+
+		if expr.HasElse {
+			g.Code += elseLabel + "\n"
+
+			if !g.GenerateStatement(expr.Children[2]) {
+				g.Code += "\tjmp " + endLabel + "\n"
+			}
+		}
+
+		g.Code += endLabel + "\n"
+
+		return false
+
+	case parser.KIND_WHILE:
+		id := expr.ID
+
+		condLabel := fmt.Sprintf("@while_cond_%d", id)
+		bodyLabel := fmt.Sprintf("@while_body_%d", id)
+		endLabel := fmt.Sprintf("@while_end_%d", id)
+
+		g.Code += condLabel + "\n"
+
+		//condition in [0]
+		cond := g.GenerateExpr(expr.Children[0])
+
+		g.Code += fmt.Sprintf(
+			"\tjnz %s, %s, %s\n",
+			cond.String,
+			bodyLabel,
+			endLabel,
+		)
+
+		g.Code += bodyLabel + "\n"
+
+		// Body in [1]
+		if !g.GenerateStatement(expr.Children[1]) {
+			g.Code += "\tjmp " + condLabel + "\n"
+		}
+
+		g.Code += endLabel + "\n"
+
+		return false
+
+	case parser.KIND_FOR:
+		id := expr.ID
+
+		condLabel := fmt.Sprintf("@for_cond_%d", id)
+		bodyLabel := fmt.Sprintf("@for_body_%d", id)
+		endLabel := fmt.Sprintf("@for_end_%d", id)
+
+		//begin in [0]
+		g.GenerateStatement(expr.Children[0])
+
+		g.Code += condLabel + "\n"
+
+		cond := g.GenerateExpr(expr.Children[1])
+
+		g.Code += fmt.Sprintf(
+			"\tjnz %s, %s, %s\n",
+			cond.String,
+			bodyLabel,
+			endLabel,
+		)
+
+		g.Code += bodyLabel + "\n"
+
+		// Body in [3]
+		if !g.GenerateStatement(expr.Children[3]) {
+			updt := expr.Children[2]
+			if updt.Kind != parser.KIND_NONE {
+				g.GenerateExpr(updt)
+			}
+			g.Code += "\tjmp " + condLabel + "\n"
+		}
+
+		g.Code += endLabel + "\n"
+
+		return false
+
+	case parser.KIND_POSTINC, parser.KIND_POSTDEC, parser.KIND_PREINC, parser.KIND_PREDEC, parser.KIND_VARINIT, parser.KIND_VARASSIGN, parser.KIND_VARSLICEASSIGN:
+		g.GenerateExpr(expr)
+		return false
+	}
+
+	panic(fmt.Sprintf("CODEGEN: unknown statement: %q", expr.Kind.String()))
+}
 
 func (g *Generator) Generate(expr *parser.Expr) string {
 	switch expr.Kind {
@@ -624,112 +1080,14 @@ func (g *Generator) Generate(expr *parser.Expr) string {
 		g.Code += "export function w $main() {\n@start\n"
 
 		for _, child := range expr.Children {
-			g.Generate(child)
+			if g.GenerateStatement(child) {
+				break
+			}
 		}
 
 		g.Code += "}\n"
 		return g.Code
 
-	case parser.KIND_RETURN:
-		value := g.GenerateExpr(expr.Children[0])
-
-		g.Code += fmt.Sprintf(
-			"\tret %s\n",
-			value.String,
-		)
-
-		return ""
-
-	case parser.KIND_DUMP:
-		value := g.GenerateExpr(expr.Children[0])
-
-		switch expr.Children[0].Type {
-		case commons.TYPE_STRING:
-
-			g.Code += fmt.Sprintf(
-				"\tcall $printf(l %s)\n",
-				value.String,
-			)
-
-			return ""
-		default:
-			Type := g.getNumberExprType(expr.Children[0].Type)
-
-			if expr.Children[0].Type == commons.TYPE_F32 {
-				value = g.emitCast(commons.TYPE_F32, commons.TYPE_F64, value)
-				Type = "d"
-			}
-
-			g.Code += fmt.Sprintf(
-				"\tcall $printf(l $%s_fmt, ..., %s %s)\n",
-				Type,
-				Type,
-				value.String,
-			)
-
-			return ""
-		}
-
-	case parser.KIND_VARINIT:
-		if expr.Type == commons.TYPE_ARRAY {
-			StoreType := g.getNumberExprStoreType(expr.ValueType)
-			ElementSize := g.getNumberExprSize(expr.ValueType)
-			ArraySize := int(expr.ValueInt)
-			name := expr.ValueString
-
-			g.Code += fmt.Sprintf(
-				"\t%%%s = l alloc%d %d\n",
-				name,
-				ElementSize,
-				ArraySize*ElementSize,
-			)
-
-			for idx, childExpr := range expr.Children {
-				child := g.GenerateExpr(childExpr)
-				tmp := g.newTemp("l")
-				g.Code += fmt.Sprintf(
-					"\t%s = l add %%%s, %d\n\tstore%s %s, %s\n",
-					tmp,
-					name,
-					idx*ElementSize,
-					StoreType,
-					child.String,
-					tmp,
-				)
-			}
-
-			return ""
-		}
-
-		value := g.GenerateExpr(expr.Children[0])
-
-		StoreType := g.getNumberExprStoreType(expr.Type)
-		Size := g.getNumberExprSize(expr.Type)
-		name := expr.ValueString
-
-		g.Code += fmt.Sprintf(
-			"\t%%%s = l alloc%d %d\n\tstore%s %s, %%%s\n",
-			name,
-			Size,
-			Size,
-			StoreType,
-			value.String,
-			name,
-		)
-
-		return ""
-
-	case parser.KIND_FREEARENA:
-		g.Code += "\tcall $lin_arena_free()\n"
-
-		return ""
-
-	case parser.KIND_CONSTSET:
-		return ""
-
-	case parser.KIND_POSTINC, parser.KIND_POSTDEC, parser.KIND_VARASSIGN, parser.KIND_VARSLICEASSIGN:
-		g.GenerateExpr(expr)
-		return ""
 	}
 
 	panic(fmt.Sprintf("CODEGEN: unknown Kind: %q", expr.Kind.String()))
