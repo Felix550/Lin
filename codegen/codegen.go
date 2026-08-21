@@ -35,7 +35,7 @@ func New() *Generator {
 }
 
 func (g *Generator) newTemp(prefix string) string {
-	name := fmt.Sprintf("%%%s_t%d", prefix, g.NumTemp)
+	name := fmt.Sprintf("%%%s_t%s", prefix, commons.NewHashName(prefix, g.NumTemp))
 	g.NumTemp++
 	return name
 }

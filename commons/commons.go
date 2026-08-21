@@ -1,6 +1,7 @@
 package commons
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"path"
 )
@@ -71,6 +72,14 @@ func (t ExprType) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+func NewHashName(name string, id int) string {
+	raw := fmt.Sprintf("%s:%d", name, id)
+
+	hash := sha256.Sum256([]byte(raw))
+
+	return fmt.Sprintf("__lin_%x", hash[:4])
 }
 
 func CrashOut(msg string, file_path string, line int, col int, Typ CrashType) {

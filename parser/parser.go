@@ -343,9 +343,10 @@ func (p *Parser) endContext() *Context {
 }
 
 func (p *Parser) newSymbolName(name string) string {
-	internal := fmt.Sprintf("%s_%d", name, p.NextSymbolID)
+	gen := commons.NewHashName(name, p.NextSymbolID)
 	p.NextSymbolID++
-	return internal
+
+	return gen
 }
 
 func (p *Parser) newIfID() int {
@@ -1065,6 +1066,10 @@ func (p *Parser) parseRawQBE() *Expr {
 
 	p.expectKind(lexer.TOKEN_LSHIFT)
 	raw := p.lexer.ReadRawQBE()
+	if strings.Contains(raw.Val_string, "__lin_") {
+		commons.CrashOut("raw QBE expression can't use namespace '__lin_' in any place", p.lexer.File_path, raw.Line, raw.Column, commons.CRASH_ERROR)
+		os.Exit(1)
+	}
 	expr := p.newExpr(KIND_RAW_QBE, resultType, qbeTok)
 	expr.ValueString = raw.Val_string
 	expr.RawCaptures = make(map[string]*Symbol)
