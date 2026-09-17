@@ -18,12 +18,18 @@ const (
 	KIND_RETURN
 	KIND_IF
 	KIND_WHILE
+	KIND_SWITCH
+	KIND_CASE
+	KIND_DEFAULT
 	KIND_FOR
+	KIND_BREAK
+	KIND_CONTINUE
 	KIND_BODY
 	KIND_FREEARENA
 	KIND_DUMP
 	KIND_LONG
 	KIND_INT
+	KIND_STRUCT
 	KIND_DOUBLE
 	KIND_FLOAT
 	KIND_STRING
@@ -41,6 +47,8 @@ const (
 	KIND_VARSLICEGET
 	KIND_VARASSIGN
 	KIND_VARSLICEASSIGN
+	KIND_VARFIELDGET
+	KIND_VARFIELDASSIGN
 	KIND_STRCAT
 	KIND_NEG
 	KIND_POSTINC
@@ -48,6 +56,7 @@ const (
 	KIND_PREINC
 	KIND_PREDEC
 	KIND_RAW_QBE
+	KIND_TYPEDECL
 
 	//Boolean Algebra
 	KIND_OR
@@ -101,6 +110,10 @@ func (t ExprKind) String() string {
 		return "assign var"
 	case KIND_VARSLICEASSIGN:
 		return "assign slice var"
+	case KIND_VARFIELDGET:
+		return "field get"
+	case KIND_VARFIELDASSIGN:
+		return "field assign"
 	case KIND_STRCAT:
 		return "string concatenation"
 	case KIND_FREEARENA:
@@ -119,8 +132,18 @@ func (t ExprKind) String() string {
 		return "while"
 	case KIND_FOR:
 		return "for"
+	case KIND_SWITCH:
+		return "switch"
+	case KIND_CASE:
+		return "case"
+	case KIND_DEFAULT:
+		return "default"
 	case KIND_BODY:
 		return "body"
+	case KIND_BREAK:
+		return "break"
+	case KIND_CONTINUE:
+		return "break"
 	case KIND_RAW_QBE:
 		return "raw qbe"
 	case KIND_OR:
@@ -141,6 +164,10 @@ func (t ExprKind) String() string {
 		return "<="
 	case KIND_NOT:
 		return "not (!)"
+	case KIND_TYPEDECL:
+		return "type declaration"
+	case KIND_STRUCT:
+		return "struct"
 	default:
 		return "unknown"
 	}
@@ -151,6 +178,7 @@ type SymbolKind int
 const (
 	SYMBOL_VAR SymbolKind = iota
 	SYMBOL_CONST
+	SYMBOL_TYPE
 )
 
 type ContextKind int
@@ -161,6 +189,9 @@ const (
 	CONTEXT_CONSTSET
 	CONTEXT_CAST
 	CONTEXT_IF
+	CONTEXT_CASE
+	CONTEXT_DEFAULT
+	CONTEXT_SWITCH
 	CONTEXT_WHILE
 	CONTEXT_FOR
 	CONTEXT_CMP
@@ -171,18 +202,28 @@ const (
 	CONTEXT_SLICE
 )
 
+type SwitchExpr struct {
+	ID      int
+	Cases   []int
+	Default int
+}
+
 type Expr struct {
 	Kind ExprKind
 	Type commons.ExprType
 
-	ValueLong   int64
-	ValueDouble float64
-	ValueInt    int32
-	ValueFloat  float32
-	ValueString string
-	ValueKind   ExprKind
-	ValueType   commons.ExprType
-	ValueSymbol *Symbol
+	ValueLong    int64
+	ValueDouble  float64
+	ValueInt     int32
+	ValueFloat   float32
+	ValueString  string
+	ValueKind    ExprKind
+	ValueType    commons.ExprType
+	ValueSymbol  *Symbol
+	ValueContext *Context
+
+	// Switch
+	ValueSwitch *SwitchExpr
 
 	// Raw QBE metadata. RawCaptures maps ${name} placeholders to Lin symbols.
 	RawResult   string
@@ -201,6 +242,17 @@ type Expr struct {
 	Parser *Parser
 }
 
+type Field struct {
+	Name       string
+	Type       commons.ExprType
+	TypeSymbol *Symbol // for structs when Type == TYPE_STRUCT
+	// for array fields (Type == TYPE_ARRAY): describe element
+	Element    commons.ExprType
+	ElementSym *Symbol
+	Size       int
+	Init       *Expr
+}
+
 type Symbol struct {
 	Name     string
 	Internal string
@@ -209,9 +261,17 @@ type Symbol struct {
 
 	Value *Expr
 
+	//Struct TYPE
+	Fields   []*Field
+	FieldMap map[string]*Field
+
 	//Array TYPE
-	Element commons.ExprType
-	Size    int
+	Element    commons.ExprType
+	ElementSym *Symbol
+	Size       int
+	// For variables of non-primitive types (e.g., struct),
+	// keep a reference to the type Symbol declaration.
+	TypeSymbol *Symbol
 }
 
 type Context struct {
@@ -225,6 +285,8 @@ type Context struct {
 	// KIND == CONTEXT_VARSET
 	VarName  string
 	VarIndex int
+	// KIND == CONTEXT_BODY
+	ID int
 }
 
 func (c *Context) Lookup(name string) (*Symbol, bool) {
@@ -262,6 +324,10 @@ type Parser struct {
 	NextIfID     int
 	NextWhileID  int
 	NextForID    int
+	NextSwitchID int
+	// >0 while parsing a sub-expression (rvalue). Assignments are forbidden
+	// when rvalueDepth > 0.
+	rvalueDepth int
 }
 
 func New(l *lexer.Lexer) *Parser {
@@ -321,6 +387,15 @@ func (p *Parser) newExpr(
 	return expr
 }
 
+func (p *Parser) parseRValue() *Expr {
+	p.rvalueDepth++
+	e := p.parseExpression()
+	p.rvalueDepth--
+	return e
+}
+
+func (p *Parser) assignAllowed() bool { return p.rvalueDepth == 0 }
+
 func (p *Parser) newContext(
 	parent *Context,
 	context *Context,
@@ -364,6 +439,12 @@ func (p *Parser) newWhileID() int {
 func (p *Parser) newForID() int {
 	id := p.NextForID
 	p.NextForID++
+	return id
+}
+
+func (p *Parser) newSwitchID() int {
+	id := p.NextSwitchID
+	p.NextSwitchID++
 	return id
 }
 
@@ -557,22 +638,72 @@ func (p *Parser) parseAssign(id lexer.Token) *Expr {
 
 	var expr *Expr
 
-	if symbol.Type == commons.TYPE_ARRAY {
-		expr = p.parseSetArrayValues(id, symbol.Size, false, symbol.Element)
-	} else {
+	switch symbol.Type {
+	case commons.TYPE_ARRAY:
+		// parse the array literal/value as an rvalue and then build a var assign
+		val := p.parseSetArrayValues(id, symbol.Size, false, symbol.Element, symbol.ElementSym)
+		left := p.newExpr(KIND_VARGET, symbol.Type, id)
+		left.ValueString = symbol.Name
+		left.ValueSymbol = symbol
+		expr = p.newExpr(KIND_VARASSIGN, symbol.Type, id, left, val)
+	case commons.TYPE_STRUCT:
+		var structVal *Expr
+		if p.lexer.PeekToken().Kind == lexer.TOKEN_ID {
+			structId := p.expectKind(lexer.TOKEN_ID)
+			structVal = p.parseStructValue(structId)
+		} else if p.lexer.PeekToken().Kind == lexer.TOKEN_LCPAREN {
+			// Infer struct type from the variable's declared type symbol
+			if symbol.TypeSymbol == nil {
+				commons.CrashOut(
+					"missing struct type information for assignment",
+					p.lexer.File_path,
+					p.lexer.PeekToken().Line,
+					p.lexer.PeekToken().Column,
+					commons.CRASH_ERROR,
+				)
+				os.Exit(1)
+			}
+			structVal = p.parseStructLiteralBody(symbol.TypeSymbol, p.lexer.PeekToken())
+		}
+		if structVal == nil {
+			commons.CrashOut(
+				"expected struct literal or struct type identifier",
+				p.lexer.File_path,
+				id.Line,
+				id.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+		// Wrap struct literal into a var assignment node
+		p.newContext(p.CurrentContext, &Context{
+			Kind:    CONTEXT_VARSET,
+			Type:    symbol.Type,
+			VarName: symbol.Name,
+		})
+		p.endContext()
+		left := p.newExpr(KIND_VARGET, symbol.Type, id)
+		left.ValueString = symbol.Name
+		left.ValueSymbol = symbol
+		expr = p.newExpr(KIND_VARASSIGN, symbol.Type, id, left, structVal)
+		expr.ValueString = symbol.Name
+	default:
 		p.newContext(p.CurrentContext, &Context{
 			Kind:    CONTEXT_VARSET,
 			Type:    symbol.Type,
 			VarName: symbol.Name,
 		})
 
-		value := p.parseExpression()
+		value := p.parseRValue()
 
 		value = p.implicitCast(value, symbol.Type)
 		value.checkType(symbol.Type)
 
 		p.endContext()
-		expr = p.newExpr(KIND_VARASSIGN, symbol.Type, id, value)
+		left := p.newExpr(KIND_VARGET, symbol.Type, id)
+		left.ValueString = symbol.Name
+		left.ValueSymbol = symbol
+		expr = p.newExpr(KIND_VARASSIGN, symbol.Type, id, left, value)
 		expr.ValueString = symbol.Name
 	}
 	expr.ValueSymbol = symbol
@@ -623,7 +754,7 @@ func (p *Parser) parseAssignmentBINOP(id lexer.Token) *Expr {
 		VarName: symbol.Name,
 	})
 
-	value := p.implicitCast(p.parseExpression(), symbol.Type)
+	value := p.implicitCast(p.parseRValue(), symbol.Type)
 	value.checkType(symbol.Type)
 
 	p.endContext()
@@ -671,6 +802,7 @@ func (p *Parser) parseAssignmentBINOP(id lexer.Token) *Expr {
 		KIND_VARASSIGN,
 		symbol.Type,
 		id,
+		left,
 		right,
 	)
 	expr_assign.ValueString = symbol.Name
@@ -713,35 +845,44 @@ func (p *Parser) checkIncDecType(
 func (p *Parser) buildIncDecAssign(target *Expr, incdecKind ExprKind) *Expr {
 	p.checkIncDecType(target.Type, target.Line, target.Column)
 
-	value := p.getValueType(1, target.Type, target)
-	binop := p.newExpr(incdecKind, target.Type, target, target, value)
+	one := p.getValueType(1, target.Type, target)
+	binop := p.newExpr(incdecKind, target.Type, target, target, one)
 	binop.ValueSymbol = target.ValueSymbol
 
+	return p.buildAssign(target, binop)
+}
+
+func (p *Parser) assignKindFor(target *Expr) ExprKind {
 	switch target.Kind {
 	case KIND_VARGET:
-		exprAssign := p.newExpr(KIND_VARASSIGN, target.Type, target, binop)
-		exprAssign.ValueString = target.ValueString
-		exprAssign.ValueSymbol = target.ValueSymbol
-		return exprAssign
-
+		return KIND_VARASSIGN
 	case KIND_VARSLICEGET:
-		exprAssign := p.newExpr(KIND_VARSLICEASSIGN, target.Type, target, binop)
-		exprAssign.ValueString = target.ValueString
-		exprAssign.ValueInt = target.ValueInt
-		exprAssign.ValueSymbol = target.ValueSymbol
-		return exprAssign
-
+		return KIND_VARSLICEASSIGN
+	case KIND_VARFIELDGET:
+		return KIND_VARFIELDASSIGN
 	default:
+		return KIND_NONE
+	}
+}
+
+func (p *Parser) buildAssign(target, value *Expr) *Expr {
+	kind := p.assignKindFor(target)
+	if kind == KIND_NONE {
 		commons.CrashOut(
-			fmt.Sprintf("invalid lvalue kind %q for ++/--", target.Kind.String()),
+			fmt.Sprintf("cannot assign to %q", target.Kind.String()),
 			p.lexer.File_path,
 			target.Line,
 			target.Column,
 			commons.CRASH_ERROR,
 		)
 		os.Exit(1)
-		return nil
 	}
+
+	e := p.newExpr(kind, target.Type, target, target, value)
+	e.ValueString = target.ValueString
+	e.ValueSymbol = target.ValueSymbol
+	e.ValueInt = target.ValueInt
+	return e
 }
 
 func (p *Parser) parsePostINCDEC(id any) *Expr {
@@ -875,81 +1016,6 @@ func (p *Parser) parsePreINCDEC() *Expr {
 	return exprPre
 }
 
-func (p *Parser) parseSlice(id lexer.Token) *Expr {
-	symbol, exists := p.CurrentContext.Lookup(id.Val_string)
-
-	if !exists {
-		commons.CrashOut(fmt.Sprintf("no symbol exists with name %q", id.Val_string), p.lexer.File_path, id.Line, id.Column, commons.CRASH_ERROR)
-		os.Exit(1)
-	}
-
-	if symbol.Type != commons.TYPE_ARRAY {
-		commons.CrashOut(fmt.Sprintf("can't slice type %q", symbol.Type.String()), p.lexer.File_path, id.Line, id.Column, commons.CRASH_ERROR)
-		os.Exit(1)
-	}
-
-	p.expectKind(lexer.TOKEN_LSPAREN)
-
-	indexExpr := p.parseSliceIndex()
-
-	if indexExpr.IsConstant() {
-		indexExpr = p.evalConst(indexExpr)
-
-		index := indexExpr.ValueInt
-		if index < 0 || int(index) >= symbol.Size {
-			commons.CrashOut(
-				fmt.Sprintf(
-					"array index %d out of bounds for array %q of size %d",
-					index,
-					symbol.Name,
-					symbol.Size,
-				),
-				p.lexer.File_path,
-				indexExpr.Line,
-				indexExpr.Column,
-				commons.CRASH_ERROR,
-			)
-			os.Exit(1)
-		}
-	}
-
-	p.expectKind(lexer.TOKEN_RSPAREN)
-
-	if _, found := p.optionalExpectKind(lexer.TOKEN_EQUAL); found {
-		if p.CurrentContext.Kind != CONTEXT_ROOT {
-			commons.CrashOut(
-				"assignment is not allowed in this context",
-				p.lexer.File_path,
-				id.Line,
-				id.Column,
-				commons.CRASH_ERROR,
-			)
-			os.Exit(1)
-		}
-		p.newContext(p.CurrentContext, &Context{
-			Kind:    CONTEXT_VARSET,
-			Type:    symbol.Element,
-			VarName: symbol.Name,
-		})
-
-		value := p.parseExpression()
-
-		value = p.implicitCast(value, symbol.Element)
-		value.checkType(symbol.Element)
-
-		p.endContext()
-		expr := p.newExpr(KIND_VARSLICEASSIGN, symbol.Element, id, indexExpr, value)
-		expr.ValueString = symbol.Name
-		expr.ValueSymbol = symbol
-		return expr
-	}
-
-	expr := p.newExpr(KIND_VARSLICEGET, symbol.Element, id, indexExpr)
-	expr.ValueString = symbol.Name
-	expr.ValueSymbol = symbol
-	return expr
-}
-
 func (p *Parser) parseId() *Expr {
 	id := p.expectKind(lexer.TOKEN_ID)
 
@@ -962,8 +1028,10 @@ func (p *Parser) parseId() *Expr {
 		return p.parseAssignmentBINOP(id)
 	case lexer.TOKEN_INC, lexer.TOKEN_DEC:
 		return p.parsePostINCDEC(id)
-	case lexer.TOKEN_LSPAREN:
-		return p.parseSlice(id)
+	case lexer.TOKEN_LRPAREN:
+		return p.parseCast(id)
+	case lexer.TOKEN_LCPAREN:
+		return p.parseStructValue(id)
 	default:
 		symbol, exists := p.CurrentContext.Lookup(id.Val_string)
 
@@ -1009,7 +1077,8 @@ func (p *Parser) parsePrimary() *Expr {
 	switch p.lexer.PeekToken().Kind {
 
 	case lexer.TOKEN_TYPE:
-		return p.parseCast()
+		Type := p.expectKind(lexer.TOKEN_TYPE)
+		return p.parseCast(Type)
 
 	case lexer.TOKEN_I64:
 		return p.parseLong()
@@ -1029,8 +1098,15 @@ func (p *Parser) parsePrimary() *Expr {
 	case lexer.TOKEN_LRPAREN:
 		return p.parseParen()
 
+	case lexer.TOKEN_LSPAREN:
+		// array literal
+		return p.parseArrayLiteral()
+
 	case lexer.TOKEN_ID:
 		return p.parseId()
+
+	//case lexer.TOKEN_LCPAREN:
+	//	return p.parseId()
 
 	case lexer.TOKEN_INC, lexer.TOKEN_DEC:
 		return p.parsePreINCDEC()
@@ -1424,7 +1500,7 @@ func (p *Parser) implicitCast(expr *Expr, finalType commons.ExprType) *Expr {
 		commons.TYPE_F64, commons.TYPE_F32, // Decimal
 		commons.TYPE_I16, commons.TYPE_I8, // Smaller
 		commons.TYPE_U16, commons.TYPE_U8, // Smaller Unsigned
-		commons.TYPE_STRING, commons.TYPE_BOOL, // "Aliases"
+		commons.TYPE_STRING, commons.TYPE_BOOL, commons.TYPE_STRUCT, commons.TYPE_ARRAY, // "Aliases"
 	)
 
 	if expr.Type == finalType {
@@ -1491,6 +1567,25 @@ func (p *Parser) implicitCast(expr *Expr, finalType commons.ExprType) *Expr {
 		}
 	}
 
+	// Allow conversion between string and array (u8[]) via explicit cast node
+	if finalType == commons.TYPE_ARRAY && expr.Type == commons.TYPE_STRING {
+		return p.newExpr(
+			KIND_CAST,
+			commons.TYPE_ARRAY,
+			expr,
+			expr,
+		)
+	}
+
+	if finalType == commons.TYPE_STRING && expr.Type == commons.TYPE_ARRAY {
+		return p.newExpr(
+			KIND_CAST,
+			commons.TYPE_STRING,
+			expr,
+			expr,
+		)
+	}
+
 	commons.CrashOut(
 		fmt.Sprintf(
 			"cannot implicitly convert %q to %q",
@@ -1510,12 +1605,286 @@ func (p *Parser) implicitCast(expr *Expr, finalType commons.ExprType) *Expr {
 func (p *Parser) parsePostfix() *Expr {
 	expr := p.parsePrimary()
 
-	switch p.lexer.PeekToken().Kind {
-	case lexer.TOKEN_INC, lexer.TOKEN_DEC:
-		return p.parsePostINCDEC(expr)
+	for {
+		switch p.lexer.PeekToken().Kind {
+		case lexer.TOKEN_LSPAREN:
+			expr = p.parseSliceExpr(expr)
+		case lexer.TOKEN_DOT:
+			expr = p.parseFieldExpr(expr)
+		case lexer.TOKEN_INC, lexer.TOKEN_DEC:
+			return p.parsePostINCDEC(expr)
+		default:
+			return expr
+		}
+	}
+}
+
+func (p *Parser) parseSliceExpr(base *Expr) *Expr {
+	if base.Type != commons.TYPE_ARRAY && base.Type != commons.TYPE_STRING {
+		commons.CrashOut(
+			fmt.Sprintf("can't slice type %q", base.Type.String()),
+			p.lexer.File_path,
+			base.Line,
+			base.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
 	}
 
-	return expr
+	p.expectKind(lexer.TOKEN_LSPAREN)
+	indexExpr := p.parseSliceIndex()
+
+	if indexExpr.IsConstant() {
+		indexExpr = p.evalConst(indexExpr)
+		index := indexExpr.ValueInt
+		if base.ValueSymbol != nil {
+			size := base.ValueSymbol.Size
+			if index < 0 || int(index) >= size {
+				commons.CrashOut(
+					fmt.Sprintf("array index %d out of bounds for array %q of size %d", index, base.ValueSymbol.Name, size),
+					p.lexer.File_path,
+					indexExpr.Line,
+					indexExpr.Column,
+					commons.CRASH_ERROR,
+				)
+				os.Exit(1)
+			}
+		}
+	}
+	p.expectKind(lexer.TOKEN_RSPAREN)
+
+	// Prefer per-element initializer info when the index is constant.
+	// For strings, the element type is u8 and there is no symbol.
+	var resultType commons.ExprType
+	var resultSymbol *Symbol
+	if base.Type == commons.TYPE_STRING {
+		resultType = commons.TYPE_U8
+		resultSymbol = nil
+	} else {
+		resultType, resultSymbol = p.arrayElementInfo(base)
+	}
+	if indexExpr.IsConstant() && base.ValueSymbol != nil && base.ValueSymbol.Value != nil {
+		idx := int(indexExpr.ValueInt)
+		if idx >= 0 && idx < len(base.ValueSymbol.Value.Children) {
+			child := base.ValueSymbol.Value.Children[idx]
+			if child != nil {
+				// If the stored child has its own symbol (e.g., a nested array),
+				// prefer that symbol/type for subsequent chained indexing.
+				if child.ValueSymbol != nil {
+					resultSymbol = child.ValueSymbol
+					resultType = child.Type
+				} else {
+					resultType = child.Type
+				}
+			}
+		}
+	}
+
+	getExpr := p.newExpr(KIND_VARSLICEGET, resultType, base, base, indexExpr)
+	getExpr.ValueString = base.ValueString
+	getExpr.ValueSymbol = resultSymbol
+	getExpr.ValueType = resultType
+
+	// Disallow assignment to string elements (strings are dynamic/immutable)
+	if _, found := p.optionalExpectKind(lexer.TOKEN_EQUAL); found {
+		if base.Type == commons.TYPE_STRING {
+			commons.CrashOut(
+				"cannot assign to string element",
+				p.lexer.File_path,
+				base.Line,
+				base.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+		if !p.assignAllowed() {
+			commons.CrashOut("assignment is not allowed in this context",
+				p.lexer.File_path, base.Line, base.Column, commons.CRASH_ERROR)
+			os.Exit(1)
+		}
+		ctx := &Context{Kind: CONTEXT_VARSET, Type: resultType, VarName: getExpr.ValueString}
+		// If index is a constant, record it in the context as a hint for
+		// downstream processing (e.g., when assigning to nested fields).
+		if indexExpr.IsConstant() {
+			ctx.VarIndex = int(indexExpr.ValueInt)
+		}
+		p.newContext(p.CurrentContext, ctx)
+		value := p.parseRValue()
+		value = p.implicitCast(value, resultType)
+		value.checkType(resultType)
+		p.endContext()
+
+		assign := p.newExpr(KIND_VARSLICEASSIGN, resultType, base, getExpr, value)
+		assign.ValueString = getExpr.ValueString
+		assign.ValueSymbol = getExpr.ValueSymbol
+		return assign
+	}
+
+	return getExpr
+}
+
+func (p *Parser) arrayElementInfo(base *Expr) (commons.ExprType, *Symbol) {
+	if base.ValueSymbol == nil {
+		return base.ValueType, nil
+	}
+	return base.ValueSymbol.Element, base.ValueSymbol.ElementSym
+}
+
+func (p *Parser) fieldTypeDescriptor(field *Field) *Symbol {
+	switch field.Type {
+	case commons.TYPE_STRUCT:
+		return field.TypeSymbol
+	case commons.TYPE_ARRAY:
+		return &Symbol{
+			Type:       commons.TYPE_ARRAY,
+			Element:    field.Element,
+			ElementSym: field.ElementSym,
+			Size:       field.Size,
+			Kind:       SYMBOL_TYPE,
+		}
+	default:
+		return nil
+	}
+}
+
+func (p *Parser) newZeroValueArray(field *Field, root lexer.Token) *Expr {
+	// create a unique anonymous name for the temp array
+	name := fmt.Sprintf("__anon_arr_%d", p.NextSymbolID)
+	token := lexer.Token{Val_string: name, Line: root.Line, Column: root.Column}
+
+	values := make([]*Expr, field.Size)
+	for i := 0; i < field.Size; i++ {
+		values[i] = p.newZeroValue(field.Element, field.ElementSym, root)
+	}
+
+	return p.makeArray(token, field.Size, field.Element, field.ElementSym, values...)
+}
+
+func (p *Parser) parseFieldExpr(base *Expr) *Expr {
+	p.expectKind(lexer.TOKEN_DOT)
+	fieldName := p.expectKind(lexer.TOKEN_ID)
+
+	if base.Type != commons.TYPE_STRUCT {
+		commons.CrashOut(
+			fmt.Sprintf("type %q is not a struct", base.Type.String()),
+			p.lexer.File_path,
+			base.Line,
+			base.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	baseTypeSym := base.ValueSymbol
+	if baseTypeSym == nil {
+		if base.ValueContext != nil {
+			baseTypeSym = base.ValueContext.Symbols[base.ValueString]
+		}
+	}
+	if baseTypeSym == nil && base.Children != nil && len(base.Children) > 0 {
+		if inner := base.Children[0]; inner != nil && inner.ValueSymbol != nil {
+			baseTypeSym = inner.ValueSymbol
+		}
+	}
+	if baseTypeSym == nil || (baseTypeSym.Type != commons.TYPE_STRUCT && baseTypeSym.Type != commons.TYPE_ARRAY) {
+		commons.CrashOut(
+			"missing struct type information for field access",
+			p.lexer.File_path,
+			base.Line,
+			base.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	curExpr := base
+	typeSym := baseTypeSym.TypeSymbol
+	if typeSym == nil && baseTypeSym.Type == commons.TYPE_STRUCT {
+		typeSym = baseTypeSym
+	}
+	for {
+		idx, field := p.findField(typeSym, fieldName.Val_string)
+		if field == nil {
+			commons.CrashOut(
+				fmt.Sprintf("struct %q has no field %q", typeSym.Name, fieldName.Val_string),
+				p.lexer.File_path,
+				fieldName.Line,
+				fieldName.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+
+		node := p.newExpr(KIND_VARFIELDGET, field.Type, base, curExpr)
+		node.ValueInt = int32(idx)
+		node.ValueSymbol = p.fieldTypeDescriptor(field)
+		node.ValueString = field.Name
+		curExpr = node
+
+		if p.lexer.PeekToken().Kind == lexer.TOKEN_DOT {
+			p.expectKind(lexer.TOKEN_DOT)
+			fieldName = p.expectKind(lexer.TOKEN_ID)
+			if field.Type != commons.TYPE_STRUCT {
+				commons.CrashOut(
+					fmt.Sprintf("field %q of struct %q is not a struct", field.Name, typeSym.Name),
+					p.lexer.File_path,
+					fieldName.Line,
+					fieldName.Column,
+					commons.CRASH_ERROR,
+				)
+				os.Exit(1)
+			}
+			typeSym = field.TypeSymbol
+			if typeSym == nil {
+				commons.CrashOut(
+					"missing nested struct type information",
+					p.lexer.File_path,
+					fieldName.Line,
+					fieldName.Column,
+					commons.CRASH_ERROR,
+				)
+				os.Exit(1)
+			}
+			continue
+		}
+		break
+	}
+
+	if _, found := p.optionalExpectKind(lexer.TOKEN_EQUAL); found {
+		if !p.assignAllowed() {
+			commons.CrashOut("assignment is not allowed in this context", p.lexer.File_path, base.Line, base.Column, commons.CRASH_ERROR)
+			os.Exit(1)
+		}
+
+		// Use the root base variable name as the VarName for the assignment
+		// context so downstream code has a consistent hint about which
+		// variable is being written. Also propagate any constant index if
+		// the base is a slice access.
+		varName := base.ValueString
+		varIndex := -1
+		if base != nil && base.Kind == KIND_VARSLICEGET && len(base.Children) >= 3 {
+			if base.Children[2].IsConstant() {
+				varIndex = int(base.Children[2].ValueInt)
+			}
+		}
+
+		ctx := &Context{Kind: CONTEXT_VARSET, Type: curExpr.Type, VarName: varName}
+		if varIndex >= 0 {
+			ctx.VarIndex = varIndex
+		}
+		p.newContext(p.CurrentContext, ctx)
+		value := p.parseRValue()
+		value = p.implicitCast(value, curExpr.Type)
+		value.checkType(curExpr.Type)
+		p.endContext()
+
+		assign := p.newExpr(KIND_VARFIELDASSIGN, curExpr.Type, base, curExpr, value)
+		assign.ValueString = curExpr.ValueString
+		assign.ValueSymbol = curExpr.ValueSymbol
+		return assign
+	}
+
+	return curExpr
 }
 
 func (p *Parser) parsePow() *Expr {
@@ -1681,7 +2050,7 @@ func (p *Parser) parseAddSub() *Expr {
 func (p *Parser) parseParen() *Expr {
 	p.expectKind(lexer.TOKEN_LRPAREN)
 
-	expr := p.parseExpression()
+	expr := p.parseRValue()
 
 	p.expectKind(lexer.TOKEN_RRPAREN)
 
@@ -1689,12 +2058,8 @@ func (p *Parser) parseParen() *Expr {
 }
 
 func (p *Parser) parseReturn() *Expr {
-	if !p.HasFreeArena && p.CurrentContext.Kind == CONTEXT_ROOT {
-		p.Root.Children = append(
-			p.Root.Children,
-			p.freeArena(),
-		)
-	}
+	// freeArena nodes are emitted by the code generator when needed; remove
+	// ad-hoc insertion here to avoid double-free and keep parser pure.
 
 	p.expectKind(lexer.TOKEN_RETURN)
 
@@ -1703,7 +2068,7 @@ func (p *Parser) parseReturn() *Expr {
 		Type: commons.TYPE_UNDEFINED,
 	})
 
-	value := p.parseExpression()
+	value := p.parseRValue()
 
 	value.checkType(commons.TYPE_I64, commons.TYPE_I32, commons.TYPE_I16, commons.TYPE_I8, commons.TYPE_U16, commons.TYPE_U8, commons.TYPE_BOOL)
 
@@ -1735,7 +2100,7 @@ func (p *Parser) parseDump() *Expr {
 		Type: commons.TYPE_UNDEFINED,
 	})
 
-	value := p.parseExpression()
+	value := p.parseRValue()
 
 	if value.IsConstant() {
 		value = p.evalConst(value)
@@ -1759,6 +2124,7 @@ func (p *Parser) parseDump() *Expr {
 
 func (p *Parser) newZeroValue(
 	typ commons.ExprType,
+	typeSym *Symbol,
 	root lexer.Token,
 ) *Expr {
 	expr := &Expr{
@@ -1798,6 +2164,47 @@ func (p *Parser) newZeroValue(
 		expr.ValueLong = -1
 		expr.ValueString = ""
 
+	case commons.TYPE_STRUCT:
+		if typeSym == nil {
+			commons.CrashOut(
+				"missing struct type information for zero-init",
+				p.lexer.File_path, root.Line, root.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+		expr.Kind = KIND_STRUCT
+		expr.ValueSymbol = typeSym
+
+		for _, field := range typeSym.Fields {
+			if field.Init != nil {
+				expr.Children = append(expr.Children, field.Init)
+				continue
+			}
+			if field.Type == commons.TYPE_ARRAY {
+				expr.Children = append(expr.Children, p.newZeroValueArray(field, root))
+				continue
+			}
+			expr.Children = append(
+				expr.Children,
+				p.newZeroValue(field.Type, field.TypeSymbol, root),
+			)
+		}
+
+	case commons.TYPE_ARRAY:
+		// For anonymous zero-init arrays, create an anonymous array variable
+		// in the current context and return its initializer expression.
+		// This case is hit only when callers pass TYPE_ARRAY directly; prefer
+		// using newZeroValueArray for field-specific array zero-init.
+		commons.CrashOut(
+			"zero-init for standalone array without element info is not supported",
+			p.lexer.File_path,
+			root.Line,
+			root.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+
 	default:
 		commons.CrashOut(
 			fmt.Sprintf(
@@ -1815,12 +2222,13 @@ func (p *Parser) newZeroValue(
 	return expr
 }
 
-func (p *Parser) makeArray(name lexer.Token, size int, Type commons.ExprType, values ...*Expr) *Expr {
+func (p *Parser) makeArray(name lexer.Token, size int, Type commons.ExprType, elemSym *Symbol, values ...*Expr) *Expr {
 	sym, _ := p.CurrentContext.Declare(name.Val_string, &Symbol{
-		Type:    commons.TYPE_ARRAY,
-		Element: Type,
-		Size:    size,
-		Kind:    SYMBOL_VAR,
+		Type:       commons.TYPE_ARRAY,
+		Element:    Type,
+		ElementSym: elemSym,
+		Size:       size,
+		Kind:       SYMBOL_VAR,
 	})
 
 	expr := p.newExpr(
@@ -1834,10 +2242,12 @@ func (p *Parser) makeArray(name lexer.Token, size int, Type commons.ExprType, va
 	expr.ValueInt = int32(size)
 	expr.ValueString = name.Val_string
 	expr.ValueSymbol = sym
+	// keep a reference from the symbol to its initializer expression
+	sym.Value = expr
 	return expr
 }
 
-func (p *Parser) parseSetArrayValues(name lexer.Token, size int, inferSize bool, finalType commons.ExprType) *Expr {
+func (p *Parser) parseSetArrayValues(name lexer.Token, size int, inferSize bool, finalType commons.ExprType, elemSym *Symbol) *Expr {
 
 	// [
 	p.expectKind(lexer.TOKEN_LSPAREN)
@@ -1865,21 +2275,26 @@ func (p *Parser) parseSetArrayValues(name lexer.Token, size int, inferSize bool,
 
 		p.newContext(p.CurrentContext, &Context{Kind: CONTEXT_VARSET, Type: finalType, VarName: name.Val_string, VarIndex: len(values)})
 
-		value := p.parseExpression()
+		value := p.parseRValue()
 
 		value.checkType(
 			commons.TYPE_I32, commons.TYPE_I64, // Full Number
 			commons.TYPE_F64, commons.TYPE_F32, // Decimal
 			commons.TYPE_I16, commons.TYPE_I8, // Smaller
 			commons.TYPE_U16, commons.TYPE_U8, // Smaller Unsigned
-			commons.TYPE_STRING, commons.TYPE_BOOL, // "Aliases"
+			commons.TYPE_STRING, commons.TYPE_BOOL, commons.TYPE_STRUCT, commons.TYPE_ARRAY, // "Aliases"
 		)
 
 		p.endContext()
 
-		// First element determines element type
+		// First element determines element type. Keep the symbol of the nested
+		// array/struct element so later slice/field access can recover the proper
+		// type metadata.
 		if finalType == commons.TYPE_UNDEFINED {
 			finalType = value.Type
+			if value.ValueSymbol != nil && (value.Type == commons.TYPE_STRUCT || value.Type == commons.TYPE_ARRAY) {
+				elemSym = value.ValueSymbol
+			}
 		} else {
 			value = p.implicitCast(value, finalType)
 			value.checkType(finalType)
@@ -1914,11 +2329,19 @@ func (p *Parser) parseSetArrayValues(name lexer.Token, size int, inferSize bool,
 
 	// Fill remaining elements
 	for len(values) < size {
-		values = append(values, p.newZeroValue(finalType, name))
+		values = append(values, p.newZeroValue(finalType, elemSym, name))
 	}
 
-	expr := p.makeArray(name, size, finalType, values...)
+	expr := p.makeArray(name, size, finalType, elemSym, values...)
 
+	return expr
+}
+
+func (p *Parser) parseArrayLiteral() *Expr {
+	// use the generic set-array values parser with anonymous name
+	anon := lexer.Token{Val_string: fmt.Sprintf("__anon_arr_%d", p.NextSymbolID), Line: p.lexer.PeekToken().Line, Column: p.lexer.PeekToken().Column}
+	p.NextSymbolID++
+	expr := p.parseSetArrayValues(anon, 0, true, commons.TYPE_UNDEFINED, nil)
 	return expr
 }
 
@@ -1928,7 +2351,7 @@ func (p *Parser) parseConstSlice() *Expr {
 		Type: commons.TYPE_I32,
 	})
 
-	idxExpr := p.parseExpression()
+	idxExpr := p.parseRValue()
 
 	if !idxExpr.IsConstant() {
 		commons.CrashOut(
@@ -1954,7 +2377,7 @@ func (p *Parser) parseSliceIndex() *Expr {
 		Type: commons.TYPE_I32,
 	})
 
-	indexExpr := p.parseExpression()
+	indexExpr := p.parseRValue()
 	indexExpr.checkType(commons.TYPE_I32)
 
 	p.endContext()
@@ -1991,19 +2414,68 @@ func (p *Parser) parseSetArray(name lexer.Token) []*Expr {
 	p.expectKind(lexer.TOKEN_RSPAREN)
 	p.expectKind(lexer.TOKEN_EQUAL)
 
-	expr := p.parseSetArrayValues(name, size, inferSize, commons.TYPE_UNDEFINED)
+	expr := p.parseSetArrayValues(name, size, inferSize, commons.TYPE_UNDEFINED, nil)
 	return []*Expr{expr}
 }
 
-func (p *Parser) parseType() (Type commons.ExprType, isArray bool, arraySize int) {
-	isArray = false
-	arraySize = 0
-	Type = p.expectKind(lexer.TOKEN_TYPE).Val_type
-	if _, found := p.optionalExpectKind(lexer.TOKEN_LSPAREN); found {
-		sizeExpr := p.parseConstSlice()
-		p.expectKind(lexer.TOKEN_RSPAREN)
-		isArray = true
-		arraySize = int(sizeExpr.ValueInt)
+func (p *Parser) parseType() (Type commons.ExprType, isArray bool, arraySize int, typeSym *Symbol) {
+	switch p.lexer.PeekToken().Kind {
+	case lexer.TOKEN_ID:
+		id := p.expectKind(lexer.TOKEN_ID)
+		sym, ok := p.CurrentContext.Lookup(id.Val_string)
+		if !ok || sym.Kind != SYMBOL_TYPE {
+			commons.CrashOut(
+				fmt.Sprintf("unknown type: %q", id.Val_string),
+				p.lexer.File_path,
+				id.Line,
+				id.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+		if sym.Type == commons.TYPE_ARRAY {
+			isArray = true
+			Type = sym.Element
+			arraySize = sym.Size
+			typeSym = sym.ElementSym
+		} else {
+			Type = sym.Type
+			typeSym = sym
+		}
+
+	case lexer.TOKEN_TYPE:
+		Type = p.expectKind(lexer.TOKEN_TYPE).Val_type
+
+		var dims []int
+		for {
+			if _, found := p.optionalExpectKind(lexer.TOKEN_LSPAREN); !found {
+				break
+			}
+			sizeExpr := p.parseConstSlice()
+			p.expectKind(lexer.TOKEN_RSPAREN)
+			dims = append(dims, int(sizeExpr.ValueInt))
+		}
+
+		if len(dims) > 0 {
+			isArray = true
+			arraySize = dims[0]
+
+			// build nested symbols from inner to outer
+			var innerSym *Symbol
+			elemType := Type
+			for d := len(dims) - 1; d >= 1; d-- {
+				innerSym = &Symbol{
+					Type:       commons.TYPE_ARRAY,
+					Element:    elemType,
+					ElementSym: innerSym,
+					Size:       dims[d],
+					Kind:       SYMBOL_TYPE,
+				}
+				elemType = commons.TYPE_ARRAY
+			}
+			typeSym = innerSym
+			Type = elemType
+		}
 	}
 	return
 }
@@ -2040,31 +2512,32 @@ func (p *Parser) parseSet() []*Expr {
 		p.expectKind(lexer.TOKEN_COMMA)
 	}
 
-	if p.lexer.PeekToken().Kind == lexer.TOKEN_TYPE {
+	if p.lexer.PeekToken().Kind == lexer.TOKEN_TYPE || p.lexer.PeekToken().Kind == lexer.TOKEN_ID {
 		result := make([]*Expr, 0, len(names))
 
-		Type, isArray, Size := p.parseType()
+		Type, isArray, Size, typeSym := p.parseType()
 		for _, name := range names {
 			var expr *Expr
 			if isArray {
 				values := make([]*Expr, Size)
 
 				for i := range values {
-					values[i] = p.newZeroValue(Type, name)
+					values[i] = p.newZeroValue(Type, typeSym, name)
 				}
 
-				expr = p.makeArray(name, Size, Type, values...)
+				expr = p.makeArray(name, Size, Type, typeSym, values...)
 			} else {
 				sym, _ := p.CurrentContext.Declare(name.Val_string, &Symbol{
-					Type: Type,
-					Kind: SYMBOL_VAR,
+					Type:       Type,
+					Kind:       SYMBOL_VAR,
+					TypeSymbol: typeSym,
 				})
 
 				expr = p.newExpr(
 					KIND_VARINIT,
 					Type,
 					name,
-					p.newZeroValue(Type, name),
+					p.newZeroValue(Type, typeSym, name),
 				)
 				expr.ValueString = name.Val_string
 				expr.ValueSymbol = sym
@@ -2097,7 +2570,7 @@ func (p *Parser) parseSet() []*Expr {
 		}
 
 		if p.lexer.PeekToken().Kind == lexer.TOKEN_LSPAREN {
-			values = append(values, p.parseSetArrayValues(names[0], 0, true, commons.TYPE_UNDEFINED))
+			values = append(values, p.parseSetArrayValues(names[i], 0, true, commons.TYPE_UNDEFINED, nil))
 		} else {
 			p.newContext(p.CurrentContext, &Context{
 				Kind:    CONTEXT_VARSET,
@@ -2105,14 +2578,14 @@ func (p *Parser) parseSet() []*Expr {
 				VarName: names[i].Val_string,
 			})
 
-			value := p.parseExpression()
+			value := p.parseRValue()
 
 			value.checkType(
 				commons.TYPE_I32, commons.TYPE_I64, // Full Number
 				commons.TYPE_F64, commons.TYPE_F32, // Decimal
 				commons.TYPE_I16, commons.TYPE_I8, // Smaller
 				commons.TYPE_U16, commons.TYPE_U8, // Smaller Unsigned
-				commons.TYPE_STRING, commons.TYPE_BOOL, // "Aliases"
+				commons.TYPE_STRING, commons.TYPE_BOOL, commons.TYPE_STRUCT, commons.TYPE_ARRAY, // "Aliases"
 			)
 
 			p.endContext()
@@ -2148,10 +2621,20 @@ func (p *Parser) parseSet() []*Expr {
 		value := values[i]
 
 		if value.Type != commons.TYPE_ARRAY {
+			var typeSym *Symbol
+			if value.Type == commons.TYPE_STRUCT {
+				typeSym = value.ValueSymbol
+			}
+
 			sym, _ := p.CurrentContext.Declare(name.Val_string, &Symbol{
-				Type: value.Type,
-				Kind: SYMBOL_VAR,
+				Type:       value.Type,
+				Kind:       SYMBOL_VAR,
+				TypeSymbol: typeSym,
 			})
+
+			if value != nil && value.Type == commons.TYPE_STRING {
+				sym.Size = len(value.ValueString)
+			}
 
 			value = p.newExpr(
 				KIND_VARINIT,
@@ -2873,7 +3356,7 @@ func (p *Parser) parseConstSet(name lexer.Token) *Expr {
 		VarName: name.Val_string,
 	})
 
-	value := p.parseExpression()
+	value := p.parseRValue()
 
 	if !value.IsConstant() {
 		commons.CrashOut(
@@ -2919,23 +3402,191 @@ func (p *Parser) parseConstSet(name lexer.Token) *Expr {
 
 //#endregion
 
-func (p *Parser) parseCast() *Expr {
-	Type := p.expectKind(lexer.TOKEN_TYPE)
+func (p *Parser) resolveStructType(id lexer.Token) *Symbol {
+	sym, exists := p.CurrentContext.Lookup(id.Val_string)
+	if !exists || sym.Kind != SYMBOL_TYPE || sym.Type != commons.TYPE_STRUCT {
+		commons.CrashOut(
+			fmt.Sprintf("%q is not a struct type", id.Val_string),
+			p.lexer.File_path, id.Line, id.Column, commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+	return sym
+}
+
+func (p *Parser) parseStructValue(id lexer.Token) *Expr {
+	typeSym := p.resolveStructType(id)
+	return p.parseStructLiteralBody(typeSym, id)
+}
+
+func (p *Parser) isNamedField() bool {
+	return p.lexer.PeekToken().Kind == lexer.TOKEN_ID &&
+		p.lexer.PeekTokenAt(1).Kind == lexer.TOKEN_COLON
+}
+
+func (p *Parser) findField(typeSym *Symbol, name string) (int, *Field) {
+	for i, f := range typeSym.Fields {
+		if f.Name == name {
+			return i, f
+		}
+	}
+	return -1, nil
+}
+
+func (p *Parser) parseFieldValue(field *Field, root lexer.Token) *Expr {
+	_ = root // Maybe i'll use it
+	if field.Type == commons.TYPE_STRUCT {
+		return p.parseStructLiteralBody(field.TypeSymbol, p.lexer.PeekToken())
+	}
+
+	p.newContext(p.CurrentContext, &Context{
+		Kind: CONTEXT_VARSET,
+		Type: field.Type,
+	})
+
+	value := p.parseRValue()
+	value = p.implicitCast(value, field.Type)
+	value.checkType(field.Type)
+
+	p.endContext()
+
+	// If the field is a fixed-size array and the provided value was an
+	// array literal with fewer elements, extend it with zero-values so the
+	// initializer matches the declared array size.
+	if field.Type == commons.TYPE_ARRAY && value != nil && value.Type == commons.TYPE_ARRAY {
+		if value.ValueSymbol != nil {
+			// Ensure the anonymous symbol reflects the declared size
+			value.ValueSymbol.Size = field.Size
+		}
+		// Fill missing elements with zero values for the element type
+		for len(value.Children) < field.Size {
+			value.Children = append(value.Children, p.newZeroValue(field.Element, field.ElementSym, root))
+		}
+		value.ValueInt = int32(field.Size)
+	}
+	return value
+}
+
+func (p *Parser) parseStructLiteralBody(typeSym *Symbol, root lexer.Token) *Expr {
+	p.expectKind(lexer.TOKEN_LCPAREN)
+
+	values := make([]*Expr, len(typeSym.Fields))
+	set := make([]bool, len(typeSym.Fields))
+
+	named := p.lexer.PeekToken().Kind != lexer.TOKEN_RCPAREN && p.isNamedField()
+	posIndex := 0
+
+	for p.lexer.PeekToken().Kind != lexer.TOKEN_RCPAREN {
+		if p.isNamedField() != named {
+			commons.CrashOut(
+				"cannot mix named and positional fields in struct literal",
+				p.lexer.File_path, root.Line, root.Column, commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+
+		var idx int
+		var field *Field
+
+		if named {
+			nameTok := p.expectKind(lexer.TOKEN_ID)
+			p.expectKind(lexer.TOKEN_COLON)
+
+			idx, field = p.findField(typeSym, nameTok.Val_string)
+			if field == nil {
+				commons.CrashOut(
+					fmt.Sprintf("struct %q has no field %q", typeSym.Name, nameTok.Val_string),
+					p.lexer.File_path, nameTok.Line, nameTok.Column, commons.CRASH_ERROR,
+				)
+				os.Exit(1)
+			}
+			if set[idx] {
+				commons.CrashOut(
+					fmt.Sprintf("field %q already initialized", nameTok.Val_string),
+					p.lexer.File_path, nameTok.Line, nameTok.Column, commons.CRASH_ERROR,
+				)
+				os.Exit(1)
+			}
+		} else {
+			if posIndex >= len(typeSym.Fields) {
+				commons.CrashOut(
+					fmt.Sprintf("too many values for struct %q", typeSym.Name),
+					p.lexer.File_path, root.Line, root.Column, commons.CRASH_ERROR,
+				)
+				os.Exit(1)
+			}
+			idx = posIndex
+			field = typeSym.Fields[idx]
+			posIndex++
+		}
+
+		values[idx] = p.parseFieldValue(field, root)
+		set[idx] = true
+
+		if p.lexer.PeekToken().Kind != lexer.TOKEN_COMMA {
+			break
+		}
+		p.expectKind(lexer.TOKEN_COMMA)
+	}
+
+	p.expectKind(lexer.TOKEN_RCPAREN)
+
+	for idx, field := range typeSym.Fields {
+		if !set[idx] {
+			values[idx] = p.newZeroValue(field.Type, field.TypeSymbol, root)
+		}
+	}
+
+	expr := p.newExpr(KIND_STRUCT, commons.TYPE_STRUCT, root, values...)
+	expr.ValueSymbol = typeSym
+	return expr
+}
+
+func (p *Parser) parseCast(tok lexer.Token) *Expr {
+	var Type commons.ExprType
+	switch tok.Kind {
+	case lexer.TOKEN_TYPE:
+		Type = tok.Val_type
+	case lexer.TOKEN_ID:
+		sym, ok := p.CurrentContext.Lookup(tok.Val_string)
+		if !ok || sym.Kind != SYMBOL_TYPE {
+			commons.CrashOut(
+				fmt.Sprintf("unknown type: %q", tok.Val_string),
+				p.lexer.File_path,
+				tok.Line,
+				tok.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+		if sym.Type == commons.TYPE_STRUCT {
+			commons.CrashOut(
+				fmt.Sprintf("cannot cast to non-primitive type: %q (%s)", tok.Val_string, sym.Type.String()),
+				p.lexer.File_path,
+				tok.Line,
+				tok.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+		Type = sym.Type
+	}
+
 	p.expectKind(lexer.TOKEN_LRPAREN)
 
 	var ctxType commons.ExprType
-	if Type.Val_type != commons.TYPE_STRING {
-		ctxType = Type.Val_type
+	if Type != commons.TYPE_STRING {
+		ctxType = Type
 	} else {
 		ctxType = commons.TYPE_UNDEFINED
 	}
 
-	if Type.Val_type == commons.TYPE_BOOL {
+	if Type == commons.TYPE_BOOL {
 		commons.CrashOut(
 			"casting to boolean may produce unexpected behavior",
 			p.lexer.File_path,
-			Type.Line,
-			Type.Column,
+			tok.Line,
+			tok.Column,
 			commons.CRASH_WARN,
 		)
 	}
@@ -2945,7 +3596,7 @@ func (p *Parser) parseCast() *Expr {
 		Type: ctxType,
 	})
 
-	Value := p.parseExpression()
+	Value := p.parseRValue()
 
 	p.endContext()
 
@@ -2953,7 +3604,7 @@ func (p *Parser) parseCast() *Expr {
 
 	return p.newExpr(
 		KIND_CAST,
-		Type.Val_type,
+		Type,
 		Value,
 		Value,
 	)
@@ -3014,7 +3665,7 @@ func (p *Parser) parseIfKind(kind lexer.TokenKind) *Expr {
 		Type: commons.TYPE_UNDEFINED,
 	})
 
-	condExpr := p.parseExpression()
+	condExpr := p.parseRValue()
 
 	if condExpr.IsConstant() {
 		condExpr = p.evalConst(condExpr)
@@ -3103,6 +3754,379 @@ func (p *Parser) parseIf() *Expr {
 	return p.parseIfKind(lexer.TOKEN_IF)
 }
 
+func (p *Parser) parseStruct(id lexer.Token) (commons.ExprType, *Symbol) {
+	p.expectKind(lexer.TOKEN_STRUCT)
+	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
+
+	if sym, exists := p.CurrentContext.Lookup(id.Val_string); exists {
+		commons.CrashOut(
+			fmt.Sprintf("symbol named %q already exists in this context", sym.Name),
+			p.lexer.File_path,
+			id.Line,
+			id.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	sym := &Symbol{
+		Type:     commons.TYPE_STRUCT,
+		Kind:     SYMBOL_TYPE,
+		Fields:   []*Field{},
+		FieldMap: make(map[string]*Field),
+	}
+
+	for {
+		if p.lexer.PeekToken().Kind == lexer.TOKEN_END {
+			p.expectKind(lexer.TOKEN_END)
+			break
+		}
+
+		name := p.expectKind(lexer.TOKEN_ID)
+
+		typ, isArray, arraySize, typeSym := p.parseType()
+
+		field := &Field{
+			Name: name.Val_string,
+		}
+		if isArray {
+			field.Type = commons.TYPE_ARRAY
+			field.Element = typ
+			field.ElementSym = typeSym
+			field.Size = arraySize
+		} else {
+			field.Type = typ
+			field.TypeSymbol = typeSym
+		}
+
+		if _, exists := sym.FieldMap[field.Name]; exists {
+			commons.CrashOut(
+				fmt.Sprintf("duplicate field %q in struct %q", field.Name, id.Val_string),
+				p.lexer.File_path,
+				name.Line,
+				name.Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+
+		sym.Fields = append(sym.Fields, field)
+		sym.FieldMap[field.Name] = field
+
+		if p.lexer.PeekToken().Kind == lexer.TOKEN_COMMA {
+			p.expectKind(lexer.TOKEN_COMMA)
+		}
+
+		p.optionalExpectKind(lexer.TOKEN_ENDLINE)
+	}
+
+	p.CurrentContext.Declare(id.Val_string, sym)
+	return commons.TYPE_STRUCT, sym
+}
+
+func (p *Parser) parseTypeDecl() *Expr {
+	tok := p.expectKind(lexer.TOKEN_TYPEKW)
+
+	id := p.expectKind(lexer.TOKEN_ID)
+
+	if sym, exists := p.CurrentContext.Lookup(id.Val_string); exists {
+		commons.CrashOut(
+			fmt.Sprintf("symbol named %q already exists in this context", sym.Name),
+			p.lexer.File_path,
+			id.Line,
+			id.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	var Type commons.ExprType
+	var ValueSymbol *Symbol
+	switch p.lexer.PeekToken().Kind {
+	case lexer.TOKEN_TYPE, lexer.TOKEN_ID:
+		Typ, isArray, arraySize, _ := p.parseType()
+		if isArray {
+			ValueSymbol = &Symbol{
+				Type:    commons.TYPE_ARRAY,
+				Kind:    SYMBOL_TYPE,
+				Element: Typ,
+				Size:    arraySize,
+			}
+			p.CurrentContext.Declare(id.Val_string, ValueSymbol)
+			Type = commons.TYPE_ARRAY
+		} else {
+			ValueSymbol = &Symbol{
+				Type: Typ,
+				Kind: SYMBOL_TYPE,
+			}
+			p.CurrentContext.Declare(id.Val_string, ValueSymbol)
+			Type = Typ
+		}
+	case lexer.TOKEN_STRUCT:
+		Type, ValueSymbol = p.parseStruct(id)
+	default:
+		commons.CrashOut(
+			fmt.Sprintf("expected type, type identifier or struct. got %q", p.lexer.PeekToken().Kind.String()),
+			p.lexer.File_path,
+			p.lexer.PeekToken().Line,
+			p.lexer.PeekToken().Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	p.expectKind(lexer.TOKEN_ENDLINE)
+
+	expr := p.newExpr(KIND_TYPEDECL, Type, tok)
+	expr.ValueSymbol = ValueSymbol
+	return expr
+}
+
+func (p *Parser) parseSwitchCase(id int, caseID int, switchType commons.ExprType, compExpr *Expr) *Expr {
+	tok := p.expectKind(lexer.TOKEN_CASE)
+
+	caseExpr := p.newExpr(
+		KIND_CASE,
+		commons.TYPE_UNDEFINED,
+		tok,
+	)
+	caseExpr.ID = caseID
+
+	for {
+		p.newContext(p.CurrentContext, &Context{
+			Kind: CONTEXT_CASE,
+			Type: switchType,
+		})
+
+		value := p.parseRValue()
+
+		value = p.implicitCast(value, switchType)
+		value.ID = len(caseExpr.Children)
+		p.endContext()
+
+		checkExpr := p.newExpr(KIND_EQ, switchType, value, value, compExpr)
+		checkExpr.ID = len(caseExpr.Children)
+
+		caseExpr.Children = append(
+			caseExpr.Children,
+			checkExpr,
+		)
+
+		if p.lexer.PeekToken().Kind != lexer.TOKEN_COMMA {
+			break
+		}
+
+		p.expectKind(lexer.TOKEN_COMMA)
+	}
+
+	p.expectKind(lexer.TOKEN_COLON)
+
+	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
+
+	p.newContext(p.CurrentContext, &Context{
+		Kind:     CONTEXT_BODY,
+		BodyKind: CONTEXT_CASE,
+		ID:       id,
+	})
+
+	body := p.parseBlock(
+		lexer.TOKEN_END,
+		lexer.TOKEN_CASE,
+		lexer.TOKEN_DEFAULT,
+	)
+	body.ID = id
+
+	p.endContext()
+
+	caseExpr.Children = append(caseExpr.Children, body)
+
+	return caseExpr
+}
+
+func (p *Parser) parseSwitchDefault(id int) *Expr {
+	tok := p.expectKind(lexer.TOKEN_DEFAULT)
+
+	p.expectKind(lexer.TOKEN_COLON)
+
+	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
+
+	p.newContext(p.CurrentContext, &Context{
+		Kind:     CONTEXT_BODY,
+		BodyKind: CONTEXT_DEFAULT,
+		ID:       id,
+	})
+
+	body := p.parseBlock(
+		lexer.TOKEN_END,
+		lexer.TOKEN_CASE,
+	)
+	body.ID = id
+
+	p.endContext()
+
+	expr := p.newExpr(
+		KIND_DEFAULT,
+		commons.TYPE_UNDEFINED,
+		tok,
+		body,
+	)
+	expr.ID = id
+
+	return expr
+}
+
+func (p *Parser) parseSwitch() *Expr {
+	tok := p.expectKind(lexer.TOKEN_SWITCH)
+
+	p.newContext(p.CurrentContext, &Context{
+		Kind: CONTEXT_SWITCH,
+		Type: commons.TYPE_UNDEFINED,
+	})
+
+	value := p.parsePrimary()
+
+	p.endContext()
+
+	expr := p.newExpr(
+		KIND_SWITCH,
+		commons.TYPE_UNDEFINED,
+		tok,
+		value,
+	)
+	expr.ValueSwitch = &SwitchExpr{
+		Cases:   make([]int, 0),
+		Default: -1,
+	}
+	id := p.newSwitchID()
+	expr.ID = id
+
+	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
+
+	for {
+		switch p.lexer.PeekToken().Kind {
+		case lexer.TOKEN_CASE:
+			caseIndex := len(expr.Children)
+
+			expr.Children = append(
+				expr.Children,
+				p.parseSwitchCase(
+					id,
+					caseIndex,
+					value.Type,
+					value,
+				),
+			)
+
+			expr.ValueSwitch.Cases = append(
+				expr.ValueSwitch.Cases,
+				caseIndex,
+			)
+
+		case lexer.TOKEN_DEFAULT:
+			defId := len(expr.Children)
+			expr.Children = append(expr.Children, p.parseSwitchDefault(id))
+			expr.ValueSwitch.Default = defId
+		case lexer.TOKEN_END:
+			p.expectKind(lexer.TOKEN_END)
+			p.expectKind(lexer.TOKEN_ENDLINE)
+			return expr
+		default:
+			commons.CrashOut(
+				"expected case, default, or end",
+				p.lexer.File_path,
+				p.lexer.PeekToken().Line,
+				p.lexer.PeekToken().Column,
+				commons.CRASH_ERROR,
+			)
+			os.Exit(1)
+		}
+	}
+}
+
+func (p *Parser) checkSupportedBodyContext() (*Context, bool) {
+	ctx := p.CurrentContext
+
+	for ctx != nil {
+		if ctx.BodyKind == CONTEXT_FOR || ctx.BodyKind == CONTEXT_WHILE || ctx.BodyKind == CONTEXT_CASE {
+			return ctx, true
+		}
+
+		ctx = ctx.Parent
+	}
+
+	return nil, false
+}
+
+func (p *Parser) parseBreak() *Expr {
+	tok := p.expectKind(lexer.TOKEN_BREAK)
+
+	if p.CurrentContext.Kind != CONTEXT_BODY {
+		commons.CrashOut(
+			"break can't be used in this context",
+			p.lexer.File_path,
+			tok.Line,
+			tok.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	ctx, ok := p.checkSupportedBodyContext()
+
+	if !ok {
+		commons.CrashOut(
+			"break can't be used in this context",
+			p.lexer.File_path,
+			tok.Line,
+			tok.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	p.expectKind(lexer.TOKEN_ENDLINE)
+
+	expr := p.newExpr(KIND_BREAK, commons.TYPE_UNDEFINED, tok)
+	expr.ValueContext = ctx
+
+	return expr
+}
+
+func (p *Parser) parseContinue() *Expr {
+	tok := p.expectKind(lexer.TOKEN_CONTINUE)
+
+	if p.CurrentContext.Kind != CONTEXT_BODY {
+		commons.CrashOut(
+			"continue can't be used in this context",
+			p.lexer.File_path,
+			tok.Line,
+			tok.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	ctx, ok := p.checkSupportedBodyContext()
+
+	if !ok {
+		commons.CrashOut(
+			"continue can't be used in this context",
+			p.lexer.File_path,
+			tok.Line,
+			tok.Column,
+			commons.CRASH_ERROR,
+		)
+		os.Exit(1)
+	}
+
+	p.expectKind(lexer.TOKEN_ENDLINE)
+
+	expr := p.newExpr(KIND_CONTINUE, commons.TYPE_UNDEFINED, tok)
+	expr.ValueContext = ctx
+
+	return expr
+}
+
 func (p *Parser) parseWhile() *Expr {
 	tok := p.expectKind(lexer.TOKEN_WHILE)
 
@@ -3114,7 +4138,7 @@ func (p *Parser) parseWhile() *Expr {
 		Type: commons.TYPE_UNDEFINED,
 	})
 
-	condExpr := p.parseExpression()
+	condExpr := p.parseRValue()
 
 	if condExpr.IsConstant() {
 		condExpr = p.evalConst(condExpr)
@@ -3136,9 +4160,12 @@ func (p *Parser) parseWhile() *Expr {
 	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
 
 	// do
+	id := p.newWhileID()
+
 	p.newContext(p.CurrentContext, &Context{
 		Kind:     CONTEXT_BODY,
 		BodyKind: CONTEXT_WHILE,
+		ID:       id,
 	})
 
 	body := p.parseBlock(
@@ -3151,7 +4178,6 @@ func (p *Parser) parseWhile() *Expr {
 
 	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
 
-	id := p.newWhileID()
 	body.ID = id
 
 	whileExpr := p.newExpr(
@@ -3191,7 +4217,7 @@ func (p *Parser) parseFor() *Expr {
 	case lexer.TOKEN_SEMICOLON:
 		// Nothing
 	default:
-		expr := p.parseExpression()
+		expr := p.parseRValue()
 		if expr.IsConstant() {
 			expr = p.evalConst(expr)
 		}
@@ -3213,7 +4239,7 @@ func (p *Parser) parseFor() *Expr {
 	condExpr := p.newExpr(KIND_BOOL, commons.TYPE_BOOL, tok)
 	condExpr.ValueInt = 1 // true
 	if p.lexer.PeekToken().Kind != lexer.TOKEN_SEMICOLON {
-		condExpr = p.parseExpression()
+		condExpr = p.parseRValue()
 
 		if condExpr.IsConstant() {
 			condExpr = p.evalConst(condExpr)
@@ -3241,7 +4267,7 @@ func (p *Parser) parseFor() *Expr {
 
 	updateExpr := p.newExpr(KIND_NONE, commons.TYPE_UNDEFINED, tok)
 	if p.lexer.PeekToken().Kind != lexer.TOKEN_DO {
-		updateExpr = p.parseExpression()
+		updateExpr = p.parseRValue()
 
 		if updateExpr.IsConstant() {
 			updateExpr = p.evalConst(updateExpr)
@@ -3252,7 +4278,7 @@ func (p *Parser) parseFor() *Expr {
 			commons.TYPE_F64, commons.TYPE_F32, // Decimal
 			commons.TYPE_I16, commons.TYPE_I8, // Smaller
 			commons.TYPE_U16, commons.TYPE_U8, // Smaller Unsigned
-			commons.TYPE_STRING, commons.TYPE_BOOL, // "Aliases"
+			commons.TYPE_STRING, commons.TYPE_BOOL, commons.TYPE_STRUCT, // "Aliases"
 		)
 	}
 
@@ -3265,9 +4291,11 @@ func (p *Parser) parseFor() *Expr {
 	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
 
 	// do
+	id := p.newForID()
 	bodyCtx := p.newContext(p.CurrentContext, &Context{
 		Kind:     CONTEXT_BODY,
 		BodyKind: CONTEXT_FOR,
+		ID:       id,
 	})
 	bodyCtx.Symbols = beginCtx.Symbols
 
@@ -3281,7 +4309,6 @@ func (p *Parser) parseFor() *Expr {
 
 	p.optionalExpectKind(lexer.TOKEN_ENDLINE)
 
-	id := p.newForID()
 	body.ID = id
 
 	whileExpr := p.newExpr(
@@ -3306,7 +4333,7 @@ func (p *Parser) parseStatement() []*Expr {
 			p.HasReturn = true
 		}
 
-		return []*Expr{p.freeArena(), p.parseReturn()}
+		return []*Expr{p.parseReturn()}
 
 	case lexer.TOKEN_DUMP:
 		return []*Expr{p.parseDump()}
@@ -3315,6 +4342,9 @@ func (p *Parser) parseStatement() []*Expr {
 		expr := p.parseSet()
 		p.expectKind(lexer.TOKEN_ENDLINE)
 		return expr
+
+	case lexer.TOKEN_TYPEKW:
+		return []*Expr{p.parseTypeDecl()}
 
 	case lexer.TOKEN_IF:
 		return []*Expr{p.parseIf()}
@@ -3329,6 +4359,15 @@ func (p *Parser) parseStatement() []*Expr {
 		expr := p.parseExpression()
 		p.expectKind(lexer.TOKEN_ENDLINE)
 		return []*Expr{expr}
+
+	case lexer.TOKEN_SWITCH:
+		return []*Expr{p.parseSwitch()}
+
+	case lexer.TOKEN_BREAK:
+		return []*Expr{p.parseBreak()}
+
+	case lexer.TOKEN_CONTINUE:
+		return []*Expr{p.parseContinue()}
 
 	case lexer.TOKEN_ID:
 		expr := p.parseExpression()
@@ -3362,10 +4401,6 @@ func (p *Parser) Parse() *Expr {
 		if p.lexer.PeekToken().Kind == lexer.TOKEN_EOF {
 
 			if !p.HasReturn {
-				root.Children = append(
-					root.Children,
-					p.freeArena(),
-				)
 				root.Children = append(
 					root.Children,
 					p.implicitReturn(),

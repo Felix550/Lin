@@ -20,31 +20,31 @@ char* lin_strcat(char* a, char* b)
     return result;
 }
 
-char* wtoa(int a)
+char* lin_wtoa(int a)
 {
     return arena_sprintf(&arena,"%d",a);
 }
 
-char* ltoa(long a)
+char* lin_ltoa(long a)
 {
     return arena_sprintf(&arena,"%ld",a);
 }
 
-char* stoa(float a)
+char* lin_stoa(float a)
 {
     return arena_sprintf(&arena,"%f",(double)a);
 }
 
-char* dtoa(double a)
+char* lin_dtoa(double a)
 {
     return arena_sprintf(&arena,"%f",a);
 }
 
-int str_eq(const char *a, const char *b){
+int lin_str_eq(const char *a, const char *b){
     return strcmp(a, b) == 0;
 }
 
-int str_ne(const char *a, const char *b){
+int lin_str_ne(const char *a, const char *b){
     return strcmp(a, b) != 0;
 }
 

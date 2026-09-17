@@ -32,6 +32,7 @@ const (
 	TYPE_U16
 	TYPE_BOOL
 	TYPE_ARRAY
+	TYPE_STRUCT
 )
 
 type CrashType int
@@ -67,6 +68,8 @@ func (t ExprType) String() string {
 		return "undefined"
 	case TYPE_ARRAY:
 		return "array"
+	case TYPE_STRUCT:
+		return "struct"
 	case TYPE_BOOL:
 		return "boolean"
 	default:

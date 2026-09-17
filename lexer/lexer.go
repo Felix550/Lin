@@ -28,6 +28,9 @@ const (
 	TOKEN_SET
 	TOKEN_CAST
 	TOKEN_IF
+	TOKEN_SWITCH
+	TOKEN_CASE
+	TOKEN_DEFAULT
 	TOKEN_ELSE
 	TOKEN_ELIF
 	TOKEN_THEN
@@ -37,6 +40,10 @@ const (
 	TOKEN_DO
 	TOKEN_QBE
 	TOKEN_RAW_QBE
+	TOKEN_BREAK
+	TOKEN_CONTINUE
+	TOKEN_TYPEKW
+	TOKEN_STRUCT
 
 	// Del
 	TOKEN_ENDLINE
@@ -44,6 +51,8 @@ const (
 	TOKEN_RRPAREN
 	TOKEN_LSPAREN
 	TOKEN_RSPAREN
+	TOKEN_LCPAREN
+	TOKEN_RCPAREN
 	TOKEN_COMMA
 	TOKEN_EQUAL
 	TOKEN_LSHIFT
@@ -73,6 +82,7 @@ const (
 	TOKEN_COLON
 	TOKEN_DOUBLECOLON
 	TOKEN_SEMICOLON
+	TOKEN_DOT
 
 	//Boolean Algebra
 	TOKEN_GT
@@ -116,6 +126,10 @@ func (t TokenKind) String() string {
 		return "["
 	case TOKEN_RSPAREN:
 		return "]"
+	case TOKEN_LCPAREN:
+		return "{"
+	case TOKEN_RCPAREN:
+		return "}"
 	case TOKEN_COMMA:
 		return ","
 	case TOKEN_PLUS:
@@ -137,7 +151,9 @@ func (t TokenKind) String() string {
 	case TOKEN_CAST:
 		return "cast"
 	case TOKEN_TYPE:
-		return "type"
+		return "type (internal)"
+	case TOKEN_TYPEKW:
+		return "type (keyword)"
 	case TOKEN_PLUS_EQUAL:
 		return "+="
 	case TOKEN_MUL_EQUAL:
@@ -160,6 +176,12 @@ func (t TokenKind) String() string {
 		return "false"
 	case TOKEN_IF:
 		return "if"
+	case TOKEN_SWITCH:
+		return "switch"
+	case TOKEN_CASE:
+		return "case"
+	case TOKEN_DEFAULT:
+		return "default"
 	case TOKEN_THEN:
 		return "then"
 	case TOKEN_ELSE:
@@ -198,6 +220,12 @@ func (t TokenKind) String() string {
 		return ";"
 	case TOKEN_LSHIFT:
 		return "<<"
+	case TOKEN_BREAK:
+		return "break"
+	case TOKEN_CONTINUE:
+		return "continue"
+	case TOKEN_STRUCT:
+		return "struct"
 	default:
 		return "unknown"
 	}
@@ -223,7 +251,7 @@ type Lexer struct {
 	line      int
 	column    int
 
-	peeked *Token
+	peekedTokens []Token
 
 	lastToken     Token
 	has_lastToken bool
@@ -263,10 +291,7 @@ func isBINOP(ch byte) bool {
 
 func (l *Lexer) continuesLine() bool {
 	switch l.peek() {
-	case '(':
-		return true
-
-	case ';':
+	case '(', '{', ';', ',':
 		return true
 
 	case '&':
@@ -364,6 +389,27 @@ func (l *Lexer) identifier() Token {
 			Line: l.line})
 	case "qbe":
 		return l.emit(Token{Kind: TOKEN_QBE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "switch":
+		return l.emit(Token{Kind: TOKEN_SWITCH, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "case":
+		return l.emit(Token{Kind: TOKEN_CASE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "default":
+		return l.emit(Token{Kind: TOKEN_DEFAULT, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "break":
+		return l.emit(Token{Kind: TOKEN_BREAK, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "continue":
+		return l.emit(Token{Kind: TOKEN_CONTINUE, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "type":
+		return l.emit(Token{Kind: TOKEN_TYPEKW, Lexeme: lexeme, Column: start_col,
+			Line: l.line})
+	case "struct":
+		return l.emit(Token{Kind: TOKEN_STRUCT, Lexeme: lexeme, Column: start_col,
 			Line: l.line})
 	}
 
@@ -682,22 +728,35 @@ func (l *Lexer) skipBlankLines() (bool, int, int) {
 	return found, line, column
 }
 
-func (l *Lexer) PeekToken() Token {
-	if l.peeked == nil {
-		tok := l.NextToken()
-		l.peeked = &tok
+func (l *Lexer) PeekTokenAt(index int) Token {
+	if index < 0 {
+		panic("PeekTokenAt: index cannot be negative")
 	}
 
-	return *l.peeked
+	for len(l.peekedTokens) <= index {
+		tok := l.nextToken()
+		l.peekedTokens = append(l.peekedTokens, tok)
+	}
+
+	return l.peekedTokens[index]
+}
+
+func (l *Lexer) PeekToken() Token {
+	return l.PeekTokenAt(0)
 }
 
 func (l *Lexer) NextToken() Token {
-	if l.peeked != nil {
-		tok := *l.peeked
-		l.peeked = nil
-		return tok
+	if len(l.peekedTokens) > 0 {
+		tok := l.peekedTokens[0]
+		l.peekedTokens = l.peekedTokens[1:]
+
+		return l.emit(tok)
 	}
 
+	return l.nextToken()
+}
+
+func (l *Lexer) nextToken() Token {
 	if found, line, column := l.skipBlankLines(); found {
 		if l.has_lastToken &&
 			l.lastToken.Kind != TOKEN_ENDLINE &&
@@ -740,6 +799,8 @@ func (l *Lexer) NextToken() Token {
 
 	start_col := l.column
 	switch l.next() {
+	case '.':
+		return l.emit(Token{Kind: TOKEN_DOT, Lexeme: ".", Line: l.line, Column: start_col})
 	case ';':
 		return l.emit(Token{Kind: TOKEN_SEMICOLON, Lexeme: ";", Line: l.line, Column: start_col})
 	case ',':
@@ -761,6 +822,10 @@ func (l *Lexer) NextToken() Token {
 		return l.emit(Token{Kind: TOKEN_LSPAREN, Lexeme: "[", Line: l.line, Column: start_col})
 	case ']':
 		return l.emit(Token{Kind: TOKEN_RSPAREN, Lexeme: "]", Line: l.line, Column: start_col})
+	case '{':
+		return l.emit(Token{Kind: TOKEN_LCPAREN, Lexeme: "{", Line: l.line, Column: start_col})
+	case '}':
+		return l.emit(Token{Kind: TOKEN_RCPAREN, Lexeme: "}", Line: l.line, Column: start_col})
 	case '+':
 		switch l.peek() {
 		case '=':

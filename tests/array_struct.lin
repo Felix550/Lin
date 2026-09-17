@@ -1,0 +1,11 @@
+type A struct
+    a i32,
+    b i32,
+    c i32[2],
+end
+
+set a = [1,2]
+set arr = [A{1,2,a}]
+dump arr[0].a
+dump arr[0].b
+dump arr[0].c[0]

@@ -1,6 +1,8 @@
-set y = 2
-set x = qbe i32 <<QBE
-    %r = w add ${y}, 5
-    yield %r
-QBE
-dump x
+type A struct
+    a i32,
+    b i32,
+    c i32[2],
+end
+
+set arr = [A{1,2,[1,2]}]
+dump 

@@ -21,6 +21,8 @@ func dumpIR(code string) {
 }
 
 func main() {
+	fmt.Println("Lin Copyright (C) 2026 Felice Di Lonardo\nThis program comes with ABSOLUTELY NO WARRANTY\nThis is free software, and you are welcome to redistribute it under certain conditions; Check 'LICENSE' for details.")
+
 	flag.CommandLine.SetInterspersed(true)
 	output := flag.StringP("output", "o", "", "output executable path")
 	run := flag.BoolP("run", "r", false, "run after compilation")
@@ -105,6 +107,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	fmt.Printf("%sOK:%s Compiled Successfully\n", commons.Green, commons.Reset)
 
 	if !*preserve_tmp {
 		os.Remove(tmp_dir)
