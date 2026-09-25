@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	fp "path/filepath"
+	"runtime"
 	"strings"
 
 	flag "github.com/spf13/pflag"
@@ -18,6 +19,25 @@ import (
 func dumpIR(code string) {
 	fmt.Println(code)
 	os.Exit(0)
+}
+
+type BackendTarget int
+
+const (
+	TARGET_LINUX BackendTarget = iota
+	TARGET_WINDOWS
+)
+
+func parseTarget(target string) BackendTarget {
+	switch strings.ToLower(target) {
+	case "windows", "w":
+		return TARGET_WINDOWS
+	case "linux", "l":
+		return TARGET_LINUX
+	default:
+		fmt.Printf("target %s is not yet supported\n", target)
+	}
+	panic(1)
 }
 
 func main() {
@@ -29,7 +49,15 @@ func main() {
 	preserve_tmp := flag.BoolP("preserve", "p", false, "preserve the tmp folder")
 	dump_backend := flag.BoolP("dump", "d", false, "dump the beckend code (qbe)")
 
+	default_target := "l"
+	if runtime.GOOS == "windows" {
+		default_target = "w"
+	}
+	backend_target := flag.StringP("target", "t", default_target, "choose the backend target [linux(l)|windows(w)] - Default: linux(l)")
+
 	flag.Parse()
+
+	target := parseTarget(*backend_target)
 
 	filepath := ""
 	if !strings.Contains(os.Args[0], "debug") {
@@ -75,7 +103,15 @@ func main() {
 		dumpIR(code)
 	}
 
-	cmd_qbe := exec.Command("qbe")
+	var cmd_qbe *exec.Cmd
+	switch target {
+	case TARGET_LINUX:
+		cmd_qbe = exec.Command("qbe", "-t", "amd64_sysv")
+	case TARGET_WINDOWS:
+		cmd_qbe = exec.Command("qbe", "-t", "amd64_win")
+	default:
+		panic("UNREACHABLE")
+	}
 
 	cmd_qbe.Stdin = bytes.NewBufferString(code)
 	cmd_qbe.Stderr = os.Stderr
@@ -101,10 +137,8 @@ func main() {
 	cmd_gcc := exec.Command("cc", s_file.Name(), "runtime/runtime.c", "-o", *output, "-lm")
 
 	cmd_gcc.Stderr = os.Stderr
-	cmd_gcc.Start()
 
-	err = cmd_gcc.Wait()
-	if err != nil {
+	if err := cmd_gcc.Run(); err != nil {
 		panic(err)
 	}
 

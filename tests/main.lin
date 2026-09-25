@@ -5,4 +5,4 @@ type A struct
 end
 
 set arr = [A{1,2,[1,2]}]
-dump 
+dump arr[0].c[1]
