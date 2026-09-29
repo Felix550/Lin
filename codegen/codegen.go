@@ -714,7 +714,7 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 	case parser.KIND_VARGET, parser.KIND_VARFIELDGET, parser.KIND_VARSLICEGET:
 		return g.generateGet(expr)
 
-	case parser.KIND_VARFIELDASSIGN, parser.KIND_VARSLICEASSIGN:
+	case parser.KIND_VARFIELDASSIGN, parser.KIND_VARSLICEASSIGN, parser.KIND_VARASSIGN:
 		return g.generateAssign(expr.Children[0], expr.Children[1])
 	case parser.KIND_STRUCT:
 		tmp := g.newTemp("l")
@@ -1106,26 +1106,26 @@ func (g *Generator) GenerateExpr(expr *parser.Expr) Value {
 			return NewValue("%"+internal, expr.Type)
 		}
 
-	case parser.KIND_VARASSIGN:
-		value := g.GenerateExpr(expr.Children[0])
-
-		if expr.Type == commons.TYPE_STRUCT {
-			// write struct fields into the variable's storage
-			structExpr := expr.Children[0]
-			g.generateStructFields(structExpr, "%"+expr.ValueSymbol.Internal, 0)
-			return value
-		}
-
-		StoreType := g.getNumberExprStoreType(expr.Type)
-
-		g.Code += fmt.Sprintf(
-			"\tstore%s %s, %%%s\n",
-			StoreType,
-			value.String,
-			expr.ValueSymbol.Internal,
-		)
-
-		return value
+	//case parser.KIND_VARASSIGN:
+	//	value := g.GenerateExpr(expr.Children[0])
+	//
+	//	if expr.Type == commons.TYPE_STRUCT {
+	//		// write struct fields into the variable's storage
+	//		structExpr := expr.Children[0]
+	//		g.generateStructFields(structExpr, "%"+expr.ValueSymbol.Internal, 0)
+	//		return value
+	//	}
+	//
+	//	StoreType := g.getNumberExprStoreType(expr.Type)
+	//
+	//	g.Code += fmt.Sprintf(
+	//		"\tstore%s %s, %%%s\n",
+	//		StoreType,
+	//		value.String,
+	//		expr.ValueSymbol.Internal,
+	//	)
+	//
+	//	return value
 
 	case parser.KIND_STRING:
 		if expr.ValueLong < 0 {
@@ -1646,10 +1646,7 @@ func (g *Generator) GenerateStatement(expr *parser.Expr) bool {
 
 		return true
 
-	case parser.KIND_POSTINC, parser.KIND_POSTDEC, parser.KIND_PREINC, parser.KIND_PREDEC, parser.KIND_VARINIT, parser.KIND_VARASSIGN, parser.KIND_VARSLICEASSIGN:
-		g.GenerateExpr(expr)
-		return false
-	case parser.KIND_VARFIELDASSIGN:
+	case parser.KIND_POSTINC, parser.KIND_POSTDEC, parser.KIND_PREINC, parser.KIND_PREDEC, parser.KIND_VARINIT, parser.KIND_VARASSIGN, parser.KIND_VARSLICEASSIGN,parser.KIND_VARFIELDASSIGN:
 		g.GenerateExpr(expr)
 		return false
 	}

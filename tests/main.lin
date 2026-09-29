@@ -1,8 +1,3 @@
-type A struct
-    a i32,
-    b i32,
-    c i32[2],
+for set i = 0; i<=10; i++ do
+    dump i
 end
-
-set arr = [A{1,2,[1,2]}]
-dump arr[0].c[1]
