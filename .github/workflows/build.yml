@@ -18,9 +18,6 @@ jobs:
         with:
           go-version: stable
 
-      - name: Setup MinGW
-        uses: egor-tensin/setup-mingw@v2
-
       - name: Build
         run: make lin
 
